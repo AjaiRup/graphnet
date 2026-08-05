@@ -2,14 +2,20 @@
 
 import logging
 import os
-from typing import Dict, List, TYPE_CHECKING, Any, Optional
+from typing import Dict, List, Tuple, TYPE_CHECKING, Any, Optional
 import warnings
 
 import numpy as np
+import torch
+from torch import Tensor
 from tqdm.std import Bar
 
 from pytorch_lightning import LightningModule, Trainer
-from pytorch_lightning.callbacks import TQDMProgressBar, EarlyStopping
+from pytorch_lightning.callbacks import (
+    Callback,
+    TQDMProgressBar,
+    EarlyStopping,
+)
 from pytorch_lightning.utilities import rank_zero_only
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import _LRScheduler
@@ -246,3 +252,130 @@ class GraphnetEarlyStopping(EarlyStopping):
         graphnet_model.load_state_dict(
             os.path.join(self.save_dir, "best_model.pth")
         )
+
+
+class RandomRotationCallback(Callback):
+    """Randomly rotate each event about the detector's z-axis.
+
+    Augments training batches in place: sensor `(x, y)` coordinates and the
+    corresponding truth quantities are rotated by a per-event angle drawn
+    uniformly from `[0, 2 * pi)`. Because IceCube's geometry is (to good
+    approximation) azimuthally symmetric, this maps a physical event onto
+    another equally physical event.
+
+    The rotation is applied to the *standardized* node features. This is exact
+    as long as the detector applies the same offset-free scaling to `x` and
+    `y`, which holds for `IceCube86` (`dom_x`, `dom_y` and `dom_z` all map
+    through `x / 500`). Verify this before using the callback with another
+    `Detector`.
+    """
+
+    def __init__(
+        self,
+        seed: Optional[int] = None,
+        x_index: int = 0,
+        y_index: int = 1,
+        direction_key: str = "direction",
+        position_keys: Tuple[str, str] = ("position_x", "position_y"),
+        azimuth_key: str = "azimuth",
+    ) -> None:
+        """Construct `RandomRotationCallback`.
+
+        Args:
+            seed: Seed of the angle generator. If None, the generator is seeded
+                non-deterministically.
+            x_index: Column of `Data.x` holding the sensor x-coordinate.
+            y_index: Column of `Data.x` holding the sensor y-coordinate.
+            direction_key: Attribute holding the truth direction unit vector of
+                shape `[batch_size, 3]`. Skipped when absent.
+            position_keys: Attributes holding the truth vertex x- and
+                y-coordinates. Skipped when absent.
+            azimuth_key: Attribute holding the truth azimuth. Skipped when
+                absent.
+        """
+        super().__init__()
+        self._x_index = x_index
+        self._y_index = y_index
+        self._direction_key = direction_key
+        self._position_keys = position_keys
+        self._azimuth_key = azimuth_key
+
+        self._generator = torch.Generator(device="cpu")
+        if seed is None:
+            self._generator.seed()
+        else:
+            self._generator.manual_seed(seed)
+
+    def on_train_batch_start(
+        self,
+        trainer: Trainer,
+        pl_module: LightningModule,
+        batch: Any,
+        batch_idx: int,
+    ) -> None:
+        """Rotate `batch` in place before it is passed to the model."""
+        for data in batch if isinstance(batch, list) else [batch]:
+            self._apply_rotation(data)
+
+    def _apply_rotation(self, data: Any) -> None:
+        n_events = int(data.batch.max().item()) + 1
+
+        # Drawn on CPU so that the augmentation is reproducible from `seed`
+        # regardless of which device the batch happens to live on.
+        angles = (
+            torch.rand(
+                n_events, generator=self._generator, dtype=torch.float32
+            )
+            * 2.0
+            * np.pi
+        ).to(data.x.device)
+        cos_event, sin_event = torch.cos(angles), torch.sin(angles)
+
+        cos_node = cos_event[data.batch].to(data.x.dtype)
+        sin_node = sin_event[data.batch].to(data.x.dtype)
+        self._rotate_pair(
+            data.x, self._x_index, self._y_index, cos_node, sin_node
+        )
+
+        direction = getattr(data, self._direction_key, None)
+        if direction is not None:
+            self._rotate_pair(
+                direction.view(n_events, -1),
+                0,
+                1,
+                cos_event.to(direction.dtype),
+                sin_event.to(direction.dtype),
+            )
+
+        x_key, y_key = self._position_keys
+        pos_x = getattr(data, x_key, None)
+        pos_y = getattr(data, y_key, None)
+        if pos_x is not None and pos_y is not None:
+            cos_pos = cos_event.to(pos_x.dtype)
+            sin_pos = sin_event.to(pos_x.dtype)
+            rotated_x = pos_x * cos_pos - pos_y * sin_pos
+            rotated_y = pos_x * sin_pos + pos_y * cos_pos
+            setattr(data, x_key, rotated_x)
+            setattr(data, y_key, rotated_y)
+
+        azimuth = getattr(data, self._azimuth_key, None)
+        if azimuth is not None:
+            setattr(
+                data,
+                self._azimuth_key,
+                (azimuth + angles.to(azimuth.dtype)) % (2.0 * np.pi),
+            )
+
+    @staticmethod
+    def _rotate_pair(
+        tensor: Tensor,
+        x_index: int,
+        y_index: int,
+        cos: Tensor,
+        sin: Tensor,
+    ) -> None:
+        """Rotate columns `x_index`/`y_index` of `tensor` in place."""
+        x = tensor[:, x_index].clone()
+        y = tensor[:, y_index].clone()
+        tensor[:, x_index] = x * cos - y * sin
+        tensor[:, y_index] = x * sin + y * cos
