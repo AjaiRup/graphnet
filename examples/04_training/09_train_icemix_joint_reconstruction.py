@@ -29,9 +29,9 @@ from graphnet.models.data_representation import GraphDefinition
 from graphnet.models.data_representation.graphs.nodes import IceMixNodes
 from graphnet.models.detector.icecube import IceCube86
 from graphnet.models.gnn import DeepIce
+from graphnet.models.task.task import IdentityTask
 from graphnet.models.task.reconstruction import (
     DirectionReconstructionWithKappaDecoupled,
-    PositionReconstruction,
 )
 from graphnet.training.callbacks import (
     PhysicsMetricsCallback,
@@ -54,6 +54,43 @@ from graphnet.data.utilities.paths import resolve_dataset_paths
 from graphnet.data.utilities.splits import seeded_event_splits
 
 POSITION_LABELS = ["position_x", "position_y", "position_z"]
+
+# Metres per unit of the standardized position targets; also handed to
+# `PhysicsMetricsCallback` so `position_error_m` stays in metres.
+POSITION_SCALE_M = 100.0
+
+
+def scale_position(x):  # type: ignore[no-untyped-def]
+    """Map vertex targets from metres to detector-centred O(1) units.
+
+    Geometry constants only, mirroring the `IceCubeDeepCore` feature map
+    (`detector/icecube.py`): x/y centred on the DeepCore string-36 axis
+    (46.3, -34.9), z shifted by the same +350 m upstream applies to input z,
+    everything divided by 100 m. Centring is the operative part: with an
+    uncentred target, any train/eval calibration drift of the backbone
+    becomes a systematic vertex offset proportional to the target mean --
+    measured at ~+20 m in z on `icemix-11666796`, whose head scaled by a
+    bare x100 without centring.
+
+    Constants are inlined, and the signature is unannotated, so that the
+    function survives serialisation into a model config. Annotating it is
+    not an option: `ModelConfig.FUNCTION_DEFINITION_PATTERN` matches a def
+    line ending `):`, so a return annotation of any kind -- including a
+    quoted one -- stops the config round-tripping. Hence the suppression
+    rather than a type.
+    """
+    x[:, 0] = (x[:, 0] - 46.3) / 100.0
+    x[:, 1] = (x[:, 1] + 34.9) / 100.0
+    x[:, 2] = (x[:, 2] + 350.0) / 100.0
+    return x
+
+
+def unscale_position(x):  # type: ignore[no-untyped-def]
+    """Invert `scale_position`, recovering metres at inference time."""
+    x[:, 0] = x[:, 0] * 100.0 + 46.3
+    x[:, 1] = x[:, 1] * 100.0 - 34.9
+    x[:, 2] = x[:, 2] * 100.0 - 350.0
+    return x
 
 
 def single_threaded_worker(worker_id: int) -> None:
@@ -426,12 +463,24 @@ def build_model(args: Any, n_features: int) -> StandardModel:
         drop_chance=args.drop_chance,
         relative_encoder=args.relative_encoder,
         n_freq=args.n_freq,
+        norm_cls=args.norm_cls,
     )
 
     tasks = [
-        PositionReconstruction(
-            hidden_size=backbone.nb_outputs,
+        # Upstream `IdentityTask` + transform hooks instead of
+        # `PositionReconstruction`: the head predicts in standardized units
+        # (see `scale_position`) and the inverse transform recovers metres at
+        # inference. This replaces the undocumented in-place x100 of
+        # `PositionReconstruction._forward`.
+        IdentityTask(
+            nb_outputs=3,
             target_labels=POSITION_LABELS,
+            prediction_labels=[
+                "position_x_pred",
+                "position_y_pred",
+                "position_z_pred",
+            ],
+            hidden_size=backbone.nb_outputs,
             loss_function=PerEventRecordingLoss(
                 EnsembleLoss(
                     loss_functions=[EuclideanDistanceLoss()],
@@ -439,6 +488,8 @@ def build_model(args: Any, n_features: int) -> StandardModel:
                 ),
                 metric_name="position",
             ),
+            transform_target=scale_position,
+            transform_inference=unscale_position,
         ),
         DirectionReconstructionWithKappaDecoupled(
             hidden_size=backbone.nb_outputs,
@@ -473,7 +524,7 @@ def build_callbacks(args: Any, output_dir: str) -> List[Any]:
     """Return the training callbacks."""
     callbacks: List[Any] = [
         ProgressBar(),
-        PhysicsMetricsCallback(),
+        PhysicsMetricsCallback(position_scale=POSITION_SCALE_M),
         ModelCheckpoint(
             dirpath=os.path.join(output_dir, "checkpoints"),
             filename="best-{epoch:02d}-{val_loss:.4f}",
@@ -957,6 +1008,17 @@ def build_parser() -> ArgumentParser:
     model_group.add_argument("--drop-path-rate", type=float, default=0.2)
     model_group.add_argument("--token-drop", type=float, default=0.0)
     model_group.add_argument("--drop-chance", type=float, default=1.0)
+    model_group.add_argument(
+        "--norm-cls",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "LayerNorm the CLS token before the task heads, pinning the "
+            "readout scale so train/eval dropout differences cannot shift "
+            "the vertex. --no-norm-cls restores the pre-fix behaviour of "
+            "runs up to icemix-11666796 (default: %(default)s)"
+        ),
+    )
 
     optimisation = parser.add_argument_group("optimisation")
     optimisation.add_argument("--lr", type=float, default=6.25e-5)
