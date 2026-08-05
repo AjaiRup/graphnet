@@ -292,6 +292,7 @@ class Block_rel(LightningModule):
         qk_scale: Optional[float] = None,
         dropout: float = 0.0,
         attn_drop: float = 0.0,
+        proj_drop: float = 0.0,
         drop_path: float = 0.0,
         init_values: Optional[float] = None,
         activation: nn.Module = nn.GELU,
@@ -312,6 +313,8 @@ class Block_rel(LightningModule):
                 matrices in the `Attention_rel` layer.
             dropout: Dropout probability to use in the `Mlp` layer.
             attn_drop: Dropout probability to use in the `Attention_rel` layer.
+            proj_drop: Dropout probability for the output projection of the
+                `Attention_rel` layer. Defaults to 0.0, i.e. no dropout.
             drop_path: Probability of applying drop path regularization to the
                 output of the layer.
             init_values: Initial value to use for the `gamma_1` and `gamma_2`
@@ -327,6 +330,7 @@ class Block_rel(LightningModule):
             input_dim,
             num_heads,
             attn_drop=attn_drop,
+            proj_drop=proj_drop,
             qkv_bias=qkv_bias,
             qk_scale=qk_scale,
             attn_head_dim=attn_head_dim,
