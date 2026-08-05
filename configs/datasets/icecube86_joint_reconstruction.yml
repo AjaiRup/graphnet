@@ -1,0 +1,66 @@
+# IceCube-86 joint direction + vertex reconstruction.
+#
+# Set DATA_ROOT before use; the training entry point expands it.
+# `selection: null` hands the split to `seeded_event_splits`,
+# reproducing the physics team's seed-42 80/10/10 partition.
+path:
+  - $DATA_ROOT/nue.db
+  - $DATA_ROOT/numu.db
+  - $DATA_ROOT/nutau.db
+data_representation:
+  class_name: GraphDefinition
+  arguments:
+    detector:
+      class_name: IceCube86
+      arguments: {}
+    node_definition:
+      class_name: IceMixNodes
+      arguments:
+        input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, hlc]
+        max_pulses: 256
+        z_name: dom_z
+        hlc_name: hlc
+        add_ice_properties: false
+    input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, hlc]
+    dtype: torch.float32
+    # `DeepIce` reads only `data.x` and `data.batch`; copying every column back
+    # out as its own per-node attribute roughly halves dataloader throughput.
+    add_static_features: false
+pulsemaps:
+  - SRTInIcePulses
+# Column 5 is `hlc`. `graphnet-cursor` puts `rde` there instead, and
+# reconstructs the vertex markedly better at matched direction performance --
+# see icecube86_joint_reconstruction_rde.yml, which is the A/B for that.
+# `pmt_area` is the column that genuinely never reaches a layer: it would sit
+# at index 6, past `n_features` 6.
+features:
+  - dom_x
+  - dom_y
+  - dom_z
+  - dom_time
+  - charge
+  - hlc
+truth:
+  - energy
+  - energy_track
+  - energy_cascade
+  - position_x
+  - position_y
+  - position_z
+  - azimuth
+  - zenith
+  - pid
+  - elasticity
+  - interaction_type
+  - inelasticity
+  - stopped_muon
+index_column: event_no
+truth_table: truth
+labels:
+  direction:
+    class_name: Direction
+    arguments:
+      azimuth_key: azimuth
+      zenith_key: zenith
+seed: 42
+selection: null

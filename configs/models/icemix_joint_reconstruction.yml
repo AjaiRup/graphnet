@@ -1,0 +1,135 @@
+arguments:
+  backbone:
+    ModelConfig:
+      arguments:
+        attn_drop: 0.05
+        charge_multiplier: 1024.0
+        depth: 12
+        depth_rel: 4
+        distance_clip_max: 4.0
+        distance_clip_min: -4.0
+        distance_multiplier: 1024.0
+        distance_scale: 18.0
+        drop_chance: 1.0
+        drop_path_rate: 0.2
+        dropout: 0.1
+        dynedge_args: null
+        eval_token_drop: false
+        head_size: 32
+        hidden_dim: 384
+        include_dynedge: false
+        init_values: 1.0
+        init_values_rel: 1.0
+        mlp_ratio: 4
+        n_features: 6
+        n_freq: 10000.0
+        n_rel: 4
+        pos_time_multiplier: 4096.0
+        proj_drop: 0.1
+        relative_encoder: spacetime
+        scaled_emb: true
+        seq_length: 128
+        token_drop: 0.0
+      class_name: DeepIce
+  data_representation:
+    ModelConfig:
+      arguments:
+        add_inactive_sensors: false
+        add_static_features: false
+        detector:
+          ModelConfig:
+            arguments:
+              replace_with_identity: null
+            class_name: IceCube86
+        dtype: torch.float32
+        edge_definition: null
+        input_feature_names:
+        - dom_x
+        - dom_y
+        - dom_z
+        - dom_time
+        - charge
+        - hlc
+        node_definition:
+          ModelConfig:
+            arguments:
+              add_ice_properties: false
+              hlc_name: hlc
+              ice_args:
+                z_offset: null
+                z_scaling: null
+              input_feature_names:
+              - dom_x
+              - dom_y
+              - dom_z
+              - dom_time
+              - charge
+              - hlc
+              max_pulses: 256
+              sample_pulses: true
+              z_name: dom_z
+            class_name: IceMixNodes
+        perturbation_dict: null
+        repeat_labels: false
+        seed: null
+        sensor_mask: null
+        sort_by: null
+        string_mask: null
+      class_name: GraphDefinition
+  gnn: null
+  graph_definition: null
+  optimizer_class: '!class torch.optim.adamw AdamW'
+  optimizer_kwargs:
+    eps: 1e-05
+    lr: 6.25e-05
+  scheduler_class: '!class torch.optim.lr_scheduler ReduceLROnPlateau'
+  scheduler_config:
+    frequency: 1
+    monitor: val_loss
+  scheduler_kwargs:
+    factor: 0.5
+    mode: min
+    patience: 6
+  tasks:
+  - ModelConfig:
+      arguments:
+        hidden_size: 384
+        loss_function:
+          ModelConfig:
+            arguments:
+              loss_function:
+                ModelConfig:
+                  arguments:
+                    loss_factors:
+                    - 0.026
+                    loss_functions:
+                    - ModelConfig:
+                        arguments: {}
+                        class_name: EuclideanDistanceLoss
+                    prediction_keys: null
+                  class_name: EnsembleLoss
+              metric_name: position
+            class_name: PerEventRecordingLoss
+        target_labels:
+        - position_x
+        - position_y
+        - position_z
+      class_name: PositionReconstruction
+  - ModelConfig:
+      arguments:
+        hidden_size: 384
+        loss_function:
+          ModelConfig:
+            arguments:
+              loss_function:
+                ModelConfig:
+                  arguments:
+                    approximation: tight
+                    kappa_switch: 700.0
+                  class_name: VonMisesFisher3DLoss
+              metric_name: direction
+            class_name: PerEventRecordingLoss
+        target_labels:
+        - direction
+      class_name: DirectionReconstructionWithKappaDecoupled
+class_name: StandardModel

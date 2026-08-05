@@ -1,0 +1,60 @@
+# Smoke-test variant of icecube86_joint_reconstruction.yml.
+#
+# Upstream's 5-event IceCube-86 fixture. Same tables and columns as
+# the production databases, including `hlc` and `rde`, and likewise
+# without `interaction_time`.
+#
+# The feature list must stay in step with the production config and with the
+# entry point's `--features` default: `GraphDefinition` asserts that the
+# columns it is handed match the ones it was built with.
+path: $GRAPHNET/data/tests/sqlite/oscNext_genie_level7_v02/oscNext_genie_level7_v02_first_5_frames.db
+data_representation:
+  class_name: GraphDefinition
+  arguments:
+    detector:
+      class_name: IceCube86
+      arguments: {}
+    node_definition:
+      class_name: IceMixNodes
+      arguments:
+        input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, hlc]
+        max_pulses: 32
+        z_name: dom_z
+        hlc_name: hlc
+        add_ice_properties: false
+    input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, hlc]
+    dtype: torch.float32
+    add_static_features: false
+pulsemaps:
+  - SRTInIcePulses
+features:
+  - dom_x
+  - dom_y
+  - dom_z
+  - dom_time
+  - charge
+  - hlc
+truth:
+  - energy
+  - energy_track
+  - energy_cascade
+  - position_x
+  - position_y
+  - position_z
+  - azimuth
+  - zenith
+  - pid
+  - elasticity
+  - interaction_type
+  - inelasticity
+  - stopped_muon
+index_column: event_no
+truth_table: truth
+labels:
+  direction:
+    class_name: Direction
+    arguments:
+      azimuth_key: azimuth
+      zenith_key: zenith
+seed: 42
+selection: null
