@@ -72,6 +72,7 @@ class DeepIce(GNN):
         distance_clip_max: float = 4.0,
         distance_multiplier: float = 1024.0,
         n_freq: float = 10000.0,
+        norm_cls: bool = False,
     ):
         """Construct `DeepIce`.
 
@@ -124,6 +125,13 @@ class DeepIce(GNN):
             distance_multiplier: Scale applied to the clipped relative distance
                 before sinusoidal encoding.
             n_freq: Number of frequencies of the sinusoidal embeddings.
+            norm_cls: If True, apply a `LayerNorm` to the CLS token before
+                returning it. Dropout and drop-path make the CLS scale differ
+                between train and eval mode, and a scale-sensitive task head
+                (e.g. an affine position head) turns that difference into a
+                systematic offset that gradients, which only flow in train
+                mode, can never correct. Normalising the readout pins its
+                scale in both modes. Default False, the upstream behaviour.
         """
         super().__init__(seq_length, hidden_dim)
         if relative_encoder not in ("spacetime", "mahalanobis"):
@@ -184,6 +192,7 @@ class DeepIce(GNN):
             ]
         )
         self.cls_token = nn.Linear(hidden_dim, 1, bias=False)
+        self.cls_norm = nn.LayerNorm(hidden_dim) if norm_cls else nn.Identity()
         self.blocks = nn.ModuleList(
             [
                 Block(
@@ -312,4 +321,4 @@ class DeepIce(GNN):
         for blk in self.blocks:
             x = blk(x, None, attn_mask)
 
-        return x[:, 0]
+        return self.cls_norm(x[:, 0])
