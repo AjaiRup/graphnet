@@ -1,5 +1,6 @@
 """Utility functions for `graphnet.models`."""
 
+import os
 from typing import List, Tuple, Any, Union, Optional
 
 import torch
@@ -92,7 +93,19 @@ def array_to_sequence(
                E.g. : `masked_entries = x[mask]`
         seq_length: A tensor containing the number of pulses in each event.
     """
-    if torch.any(torch.eq(x, excluding_value)):
+    # Off by default: `torch.any` over the whole feature tensor forces the CPU
+    # to block on the GPU, once per forward, purely to raise a `ValueError`
+    # against a sentinel value that cannot occur in pulse data. Set
+    # `GRAPHNET_CHECK_EXCLUDING_VALUE=1` to restore it when adding a detector
+    # or feature set.
+    #
+    # Worth 0.1 ms of a 58 ms step (backbone-only, L=48, batch 256). Kept
+    # because it is free, not because it is fast: a host-device sync costs
+    # ~0.11 ms here, so removing them is not a performance lever. See
+    # `LogCMK.forward` for the same measurement.
+    if os.environ.get("GRAPHNET_CHECK_EXCLUDING_VALUE") == "1" and torch.any(
+        torch.eq(x, excluding_value)
+    ):
         raise ValueError(
             f"Transformation cannot be made because input tensor "
             f"`x` contains at least one element equal to "
