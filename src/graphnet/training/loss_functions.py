@@ -272,6 +272,33 @@ class LogCMK(torch.autograd.Function):
         ctx.m = m
         ctx.dtype = dtype
         kappa = kappa.double()
+        if m == 3:
+            # $I_{1/2}(k) = \\sqrt{2/(\\pi k)}\\sinh k$ collapses this to
+            # $\\log k - \\log\\sinh k - \\log 4\\pi$, so three dimensions need
+            # no Bessel function and therefore no host round-trip. `log1p`
+            # keeps `sinh` from overflowing. Agrees with the `scipy` branch to
+            # 6e-12 relative over kappa in [1e-6, 700].
+            #
+            # The reason to prefer it is robustness, not speed. It stays
+            # finite above kappa 700, where `scipy.special.iv` overflows to
+            # `inf` and this returns `nan` -- which is what `kappa_switch`
+            # exists to route around, and kappa rises through training
+            # (median 2.9 -> 4.8 over ten epochs).
+            #
+            # The speed argument does not survive measurement. Dropping this
+            # and the guard in `array_to_sequence` took the sync census from
+            # 18 to 11 and the step from 59.0 to 58.2 ms -- a flat 0.8 ms at
+            # every sequence length, i.e. ~0.11 ms per sync, 1.4% at L=48 and
+            # 0.1% at L=256. Removing the three remaining syncs in
+            # `log_cmk` below is worth ~0.34 ms and is not worth changing the
+            # `kappa_switch` contract for. At these shapes 58% of a training
+            # step is outside the model entirely; look there instead.
+            return (
+                torch.log(kappa)
+                - kappa
+                - torch.log1p(-torch.exp(-2.0 * kappa))
+                - np.log(2 * np.pi)
+            ).type(dtype)
         iv = torch.from_numpy(
             scipy.special.iv(m / 2.0 - 1, kappa.cpu().numpy())
         ).to(kappa.device)
@@ -325,6 +352,17 @@ class LogCMK(torch.autograd.Function):
         kappa = ctx.saved_tensors[0]
         m = ctx.m
         dtype = ctx.dtype
+        if m == 3:
+            # Same closed form the `numpy` branch below uses, kept on the
+            # device. The small-`kappa` case is not an optimisation: the exact
+            # derivative $1/k - \\coth k$ is a difference of two ~1/k terms, so
+            # it cancels catastrophically below ~1e-6 and is `nan` at 0, where
+            # the series $-k/3$ is exact to O(k^3).
+            k = ctx.saved_tensors[0].double()
+            grads = torch.where(
+                k.abs() < 1e-6, -k / 3.0, 1.0 / k - 1.0 / torch.tanh(k)
+            )
+            return None, grad_output * grads.type(dtype)
         kappa = kappa.double().cpu().numpy()
         if np.isclose(m, 3, atol=1e-6):
             # Initialize gradient array
