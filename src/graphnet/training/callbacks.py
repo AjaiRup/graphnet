@@ -490,6 +490,7 @@ class PhysicsMetricsCallback(Callback):
         self,
         position_loss_name: str = "position",
         direction_loss_name: str = "direction",
+        position_scale: float = 1.0,
     ) -> None:
         """Construct `PhysicsMetricsCallback`.
 
@@ -499,10 +500,17 @@ class PhysicsMetricsCallback(Callback):
                 vertex metrics.
             direction_loss_name: `metric_name` of the `PerEventRecordingLoss`
                 wrapping the direction loss.
+            position_scale: Metres per unit of the recorded position values.
+                The recorder captures what the loss sees, so when the task
+                standardizes its targets (`transform_target`), the recorded
+                values are in transformed units and `position_error_m` needs
+                this factor to stay in metres. Offsets cancel in the
+                difference, so a scalar suffices for a uniform per-axis scale.
         """
         super().__init__()
         self._position_loss_name = position_loss_name
         self._direction_loss_name = direction_loss_name
+        self._position_scale = position_scale
         self._keys = (
             "position_error_m",
             "angular_error_deg",
@@ -545,8 +553,11 @@ class PhysicsMetricsCallback(Callback):
             # task's loss is weighted or composed.
             prediction = position.last_prediction
             target = position.last_target.reshape(prediction.size(0), -1)
-            values["position_error_m"] = torch.linalg.vector_norm(
-                prediction[:, :3] - target[:, :3], dim=1
+            values["position_error_m"] = (
+                self._position_scale
+                * torch.linalg.vector_norm(
+                    prediction[:, :3] - target[:, :3], dim=1
+                )
             )
 
         direction = recorders.get(self._direction_loss_name)
