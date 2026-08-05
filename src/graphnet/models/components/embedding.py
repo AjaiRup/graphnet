@@ -195,7 +195,22 @@ class FourierEncoder(LightningModule):
         )  # Time
 
         if self.n_features >= 6:
-            embeddings.append(self.aux_emb(x[:, :, 5].long()))  # Auxiliary
+            # Threshold rather than cast. `aux_emb` is `nn.Embedding(2, ...)`,
+            # so column 5 has to arrive as an index in {0, 1}. `.long()` gives
+            # that for `hlc`, which the detector passes through as {0.0, 1.0},
+            # but truncates any *standardized* two-valued feature to the wrong
+            # index -- `rde` standardizes to {-1.0, 0.4}, and -1 is not a legal
+            # embedding index at all. Thresholding at zero is exactly
+            # equivalent for `hlc` and correct for either.
+            #
+            # This is lossless only while column 5 is two-valued, which holds
+            # for `hlc` and for `rde` in the oscNext samples (1.0 on standard
+            # IceCube DOMs, 1.35 on DeepCore high-QE DOMs, no other values). A
+            # genuinely continuous sixth feature needs a sinusoidal embedding
+            # here instead, as `graphnet-cursor` uses.
+            embeddings.append(
+                self.aux_emb((x[:, :, 5] > 0).long())
+            )  # Auxiliary
 
         # `x.shape[1]` rather than `max(seq_length)`: `array_to_sequence` pads
         # to exactly `seq_length.max()`, so the two are identical -- but
