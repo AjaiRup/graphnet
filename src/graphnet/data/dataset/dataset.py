@@ -259,6 +259,7 @@ class Dataset(
         loss_weight_default_value: Optional[float] = None,
         seed: Optional[int] = None,
         labels: Optional[Dict[str, Any]] = None,
+        add_default_labels: bool = True,
     ):
         """Construct Dataset.
 
@@ -306,6 +307,12 @@ class Dataset(
                 events ~ event_no % 5 > 0"`).
             data_representation: Method that defines the data representation.
             labels: Dictionary of labels to be added to the dataset.
+            add_default_labels: If True, `_get_labels` derives the ten
+                classification labels (`muon`, `v_e`, `track`, ...) from the
+                truth table and attaches them to every event. Models that do
+                not read them pay for ten extra tensor allocations per event
+                and ten extra columns through collate; set False to attach
+                only `index_column`. Defaults to True.
 
             graph_definition: Method that defines the graph representation.
                 NOTE: DEPRECATED Use `data_representation` instead.
@@ -334,6 +341,7 @@ class Dataset(
         self._index_column = index_column
         self._truth_table = truth_table
         self._loss_weight_default_value = loss_weight_default_value
+        self._add_default_labels = add_default_labels
 
         if data_representation is None:
             if graph_definition is not None:
@@ -741,6 +749,9 @@ class Dataset(
 
     def _get_labels(self, truth_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Return dictionary of  labels, to be added as graph attributes."""
+        if not self._add_default_labels:
+            return {self._index_column: truth_dict[self._index_column]}
+
         if "pid" in truth_dict.keys():
             abs_pid = abs(truth_dict["pid"])
 
