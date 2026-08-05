@@ -358,11 +358,57 @@ class VonMisesFisherLoss(LossFunction):
     prediction vectors need to be prepared.
     """
 
+    def __init__(
+        self,
+        kappa_switch: float = 700.0,
+        approximation: str = "tight",
+        **kwargs: Any,
+    ) -> None:
+        """Construct `VonMisesFisherLoss`.
+
+        Args:
+            kappa_switch: Value of `kappa` above which an asymptotic
+                approximation is used in place of the exact `log_cmk_exact`.
+                `log_cmk_exact` overflows in float64 for `kappa` >~ 710, which
+                bounds this from above.
+            approximation: Which asymptotic form to use above `kappa_switch`,
+                `"bound"` or `"tight"`. See `log_cmk_approx_tight` for the
+                trade-off between them.
+            kwargs: Additional arguments passed to `LossFunction`.
+        """
+        super().__init__(**kwargs)
+        self._kappa_switch = kappa_switch
+        self._approximation = approximation
+        # Fail at construction rather than in the first backward pass.
+        self._resolve_approximation(approximation)
+
+    @classmethod
+    def _resolve_approximation(cls, approximation: str) -> Any:
+        """Return the approximation callable named by `approximation`."""
+        approximations = {
+            "bound": cls.log_cmk_approx,
+            "tight": cls.log_cmk_approx_tight,
+        }
+        if approximation not in approximations:
+            raise ValueError(
+                f"Unknown approximation '{approximation}'. Expected one of "
+                f"{sorted(approximations)}."
+            )
+        return approximations[approximation]
+
     @classmethod
     def log_cmk_exact(
         cls, m: int, kappa: Tensor
     ) -> Tensor:  # pylint: disable=invalid-name
-        """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss exactly."""
+        """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss exactly.
+
+        `LogCMK` computes the three-dimensional case entirely on the device;
+        only m != 3 reaches `scipy`. That matters for speed rather than
+        accuracy: the `scipy` path moves `kappa` to the host and back in the
+        forward *and* the backward, which is six of the eighteen host-device
+        synchronisation points in a training step, and the observed `kappa`
+        (median ~4.5) puts essentially every event on the exact branch.
+        """
         return LogCMK.apply(m, kappa)
 
     @classmethod
@@ -372,6 +418,12 @@ class VonMisesFisherLoss(LossFunction):
         """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss approx.
 
         [https://arxiv.org/abs/1812.04616] Sec. 8.2 with additional minus sign.
+
+        Satisfies that paper's inequality: once anchored to the exact value at
+        small `kappa`, this stays at or below `log_cmk_exact` everywhere, so
+        the resulting loss is an upper bound on the true negative
+        log-likelihood. It pays for that with accuracy - see
+        `log_cmk_approx_tight`.
         """
         v = m / 2.0 - 0.5
         a = torch.sqrt((v + 1) ** 2 + kappa**2)
@@ -379,24 +431,54 @@ class VonMisesFisherLoss(LossFunction):
         return -a + b * torch.log(b + a)
 
     @classmethod
+    def log_cmk_approx_tight(
+        cls, m: int, kappa: Tensor
+    ) -> Tensor:  # pylint: disable=invalid-name
+        """Calculate $log C_{m}(k)$ approximately, favouring accuracy.
+
+        For `m = 3` the exact term is
+        `log C_3(k) = log(k) - log(4 * pi * sinh(k))`. In `log_cmk_approx` the
+        coefficient `b = v - 1` vanishes identically at `m = 3`, dropping the
+        leading `log(k)`; its error, and its error on `d/dk`, then grow without
+        bound in `kappa`. This form keeps that term: its residual against the
+        exact value tends to the constant `log(2 * pi)`, and constants do not
+        reach the gradient.
+
+        The trade-off is that it is *not* a lower bound on `log_cmk_exact` -
+        anchored at small `kappa` it sits slightly above, so the resulting loss
+        is no longer a strict upper bound on the negative log-likelihood. Which
+        property matters more is a modelling choice, hence the
+        `approximation` argument.
+        """
+        v = m / 2.0
+        a = torch.sqrt((v + 0.5) ** 2 + kappa**2)
+        b = v - 0.5
+        return -a + b * torch.log(b + a)
+
+    @classmethod
     def log_cmk(
-        cls, m: int, kappa: Tensor, kappa_switch: float = 100.0
+        cls,
+        m: int,
+        kappa: Tensor,
+        kappa_switch: float = 700.0,
+        approximation: str = "tight",
     ) -> Tensor:  # pylint: disable=invalid-name
         """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss.
 
         Since `log_cmk_exact` is diverges for `kappa` >~ 700 (using float64
-        precision), and since `log_cmk_approx` is unaccurate for small `kappa`,
-        this method automatically switches between the two at `kappa_switch`,
-        ensuring continuity at this point.
+        precision), and since the asymptotic approximations are unaccurate for
+        small `kappa`, this method automatically switches between the two at
+        `kappa_switch`, ensuring continuity at this point.
         """
+        log_cmk_approx = cls._resolve_approximation(approximation)
         kappa_switch = torch.tensor([kappa_switch]).to(kappa.device)
         mask_exact = kappa < kappa_switch
 
         # Ensure continuity at `kappa_switch`
-        offset = cls.log_cmk_approx(m, kappa_switch) - cls.log_cmk_exact(
+        offset = log_cmk_approx(m, kappa_switch) - cls.log_cmk_exact(
             m, kappa_switch
         )
-        ret = cls.log_cmk_approx(m, kappa) - offset
+        ret = log_cmk_approx(m, kappa) - offset
         ret[mask_exact] = cls.log_cmk_exact(m, kappa[mask_exact])
         return ret
 
@@ -422,7 +504,10 @@ class VonMisesFisherLoss(LossFunction):
         m = target.size()[1]
         k = torch.norm(prediction, dim=1)
         dotprod = torch.sum(prediction * target, dim=1)
-        elements = -self.log_cmk(m, k) - dotprod
+        elements = (
+            -self.log_cmk(m, k, self._kappa_switch, self._approximation)
+            - dotprod
+        )
         return elements
 
     @abstractmethod
@@ -475,7 +560,7 @@ class VonMisesFisher2DLoss(VonMisesFisherLoss):
 
 
 class EuclideanDistanceLoss(LossFunction):
-    """Mean squared error in three dimensions."""
+    """Euclidean (L2) distance in three dimensions."""
 
     def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
         """Calculate 3D Euclidean distance between predicted and target.
@@ -485,12 +570,18 @@ class EuclideanDistanceLoss(LossFunction):
             target: Target tensor, extracted from graph object.
 
         Returns:
-            Elementwise von Mises-Fisher loss terms. Shape [N,]
+            Elementwise Euclidean distances. Shape [N,]
         """
-        return torch.sqrt(
+        squared = (
             (prediction[:, 0] - target[:, 0]) ** 2
             + (prediction[:, 1] - target[:, 1]) ** 2
             + (prediction[:, 2] - target[:, 2]) ** 2
+        )
+        # The gradient of sqrt is unbounded at zero, so a prediction that
+        # lands exactly on the target would emit a NaN gradient. Clamping
+        # to machine epsilon caps the gradient instead.
+        return torch.sqrt(
+            torch.clamp_min(squared, torch.finfo(squared.dtype).eps)
         )
 
 
