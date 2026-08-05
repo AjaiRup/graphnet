@@ -1,0 +1,182 @@
+"""Utilities for reading the number of pulses per event.
+
+`LengthGroupedSampler` needs the pulse count of every event before the epoch
+starts, so it can order events by length and hand the `DataLoader` batches that
+are padded to something near their own mean. Reading them the obvious way - by
+constructing each event and asking for `num_nodes`, as `LenMatchBatchSampler`
+does - means building the whole dataset a second time every epoch. These
+helpers read the counts straight from the pulsemap instead, and cache them.
+
+The cache contract mirrors `seeded_event_splits`: a `cache_dir`, one file per
+database, keyed by the database's basename. The two name their files
+differently, so one directory can hold both. The payload is `.npz`
+rather than JSON because the production databases hold ~10.4 M events between
+them; two `int32` arrays of that length are ~83 MB and load in well under a
+second, where the equivalent JSON is ~150 MB and tens of seconds - paid on
+every DDP rank, every run.
+"""
+
+import os
+import sqlite3
+from functools import lru_cache
+from typing import List, Optional, Sequence, Tuple
+
+import numpy as np
+
+from graphnet.utilities.logging import Logger
+
+# `(event_no, n_pulses)`, both sorted ascending by `event_no`.
+PulseCountIndex = Tuple[np.ndarray, np.ndarray]
+
+
+def _cache_path(cache_dir: str, path: str, pulsemap: str) -> str:
+    """Return the cache file for `path`'s counts over `pulsemap`."""
+    stem = os.path.basename(path)
+    if stem.endswith(".db"):
+        stem = stem[: -len(".db")]
+    return os.path.join(cache_dir, f"lengths_{stem}.{pulsemap}.npz")
+
+
+# Called once per split per database, on every rank -- nine times a run at
+# three databases. The arrays are never mutated by `event_lengths`, which
+# concatenates into a fresh one, so they are safe to hand out repeatedly.
+@lru_cache(maxsize=None)
+def pulse_counts(
+    path: str,
+    pulsemap: str = "SRTInIcePulses",
+    index_column: str = "event_no",
+    cache_dir: Optional[str] = None,
+) -> PulseCountIndex:
+    """Return the number of pulses of every event in `path`.
+
+    Args:
+        path: Path to the SQLite database.
+        pulsemap: Name of the table holding one row per pulse.
+        index_column: Name of the event index column.
+        cache_dir: If given, the counts are read from - and on a miss written
+            to - this directory. Without it the pulsemap is scanned on every
+            call, which is a full covering-index scan: seconds for a
+            well-clustered database, tens of minutes for a fragmented one.
+
+    Returns:
+        `(event_no, n_pulses)`, both sorted ascending by `event_no`.
+    """
+    logger = Logger()
+
+    if cache_dir is not None:
+        cache_path = _cache_path(cache_dir, path, pulsemap)
+        if os.path.exists(cache_path):
+            try:
+                with np.load(cache_path) as handle:
+                    cached = (handle["event_no"], handle["n_pulses"])
+                logger.info(
+                    f"Read {len(cached[0])} pulse counts for "
+                    f"{os.path.basename(path)} from {cache_path}"
+                )
+                return cached
+            except (OSError, ValueError, KeyError):
+                logger.warning(
+                    f"Ignoring unreadable length cache {cache_path}"
+                )
+
+    logger.info(
+        f"No cached pulse counts for {os.path.basename(path)}; scanning "
+        f"{pulsemap}. This is a full index scan - pass `cache_dir` to do it "
+        "once rather than once per run."
+    )
+    with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as connection:
+        rows = connection.execute(
+            f"SELECT {index_column}, COUNT(*) FROM {pulsemap} "
+            f"GROUP BY {index_column}"
+        ).fetchall()
+
+    # `GROUP BY` over the index already emits ascending keys, but the sort is
+    # cheap next to the scan and makes the postcondition unconditional -
+    # `event_lengths` relies on it for `searchsorted`.
+    event_no = np.fromiter(
+        (row[0] for row in rows), dtype=np.int64, count=len(rows)
+    )
+    counts = np.fromiter(
+        (row[1] for row in rows), dtype=np.int32, count=len(rows)
+    )
+    order = np.argsort(event_no, kind="stable")
+    index = (event_no[order], counts[order])
+
+    if cache_dir is not None:
+        os.makedirs(cache_dir, exist_ok=True)
+        cache_path = _cache_path(cache_dir, path, pulsemap)
+        np.savez(cache_path, event_no=index[0], n_pulses=index[1])
+        logger.info(f"Wrote {len(index[0])} pulse counts to {cache_path}")
+
+    return index
+
+
+def event_lengths(
+    paths: Sequence[str],
+    selections: Sequence[Sequence[int]],
+    pulsemap: str = "SRTInIcePulses",
+    index_column: str = "event_no",
+    cache_dir: Optional[str] = None,
+    max_pulses: Optional[int] = None,
+) -> np.ndarray:
+    """Return pulse counts positionally, in `EnsembleDataset` order.
+
+    `paths` and `selections` line up one-to-one, and the selections are
+    concatenated in order - which is exactly how `EnsembleDataset` (a
+    `ConcatDataset`) indexes its constituents. The returned array can
+    therefore be indexed by the same integer a `Sampler` yields.
+
+    The per-database index is dropped as soon as it has been used, so peak
+    memory is one database's counts rather than all of them.
+
+    Args:
+        paths: Paths to the SQLite databases, in dataset order.
+        selections: Event indices read from each database, in dataset order.
+        pulsemap: Name of the table holding one row per pulse.
+        index_column: Name of the event index column.
+        cache_dir: Passed to `pulse_counts`.
+        max_pulses: If given, counts are clipped here - matching the cap
+            `IceMixNodes` applies - so grouping sees the length the model
+            will actually process.
+
+    Returns:
+        `int32` array of length `sum(len(s) for s in selections)`.
+    """
+    if len(paths) != len(selections):
+        raise ValueError(
+            f"Got {len(paths)} path(s) but {len(selections)} selection(s); "
+            "they must line up one-to-one."
+        )
+
+    lengths: List[np.ndarray] = []
+    for path, selection in zip(paths, selections):
+        wanted = np.asarray(selection, dtype=np.int64)
+        event_no, counts = pulse_counts(
+            path=path,
+            pulsemap=pulsemap,
+            index_column=index_column,
+            cache_dir=cache_dir,
+        )
+        position = np.searchsorted(event_no, wanted)
+        # An event absent from the pulsemap has no pulses. `searchsorted` puts
+        # it at the insertion point, which may be one past the end, so clip
+        # before indexing and zero the misses afterwards.
+        position = np.clip(position, 0, len(event_no) - 1)
+        found = event_no[position] == wanted
+        resolved = np.where(found, counts[position], 0).astype(np.int32)
+
+        missing = int((~found).sum())
+        if missing:
+            Logger().warning(
+                f"{missing} of {len(wanted)} selected events have no rows in "
+                f"{pulsemap} of {os.path.basename(path)}; treating them as "
+                "zero-pulse events."
+            )
+        lengths.append(resolved)
+
+    stacked = (
+        np.concatenate(lengths) if lengths else np.empty(0, dtype=np.int32)
+    )
+    if max_pulses is not None:
+        np.minimum(stacked, max_pulses, out=stacked)
+    return stacked
