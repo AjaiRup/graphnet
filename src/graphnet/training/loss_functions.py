@@ -716,3 +716,45 @@ class NegCosLoss(LossFunction):
         orig_norm = torch.nn.functional.normalize(target, dim=1)
         elements = -(reco_norm * orig_norm).sum(dim=1)
         return elements
+
+
+class PerEventRecordingLoss(LossFunction):
+    """Transparent wrapper that retains a loss' most recent per-event terms.
+
+    Delegates to `loss_function` unchanged - the returned elements, and hence
+    the gradient, are identical to using `loss_function` directly - while
+    stashing the detached prediction, target and elementwise loss of the most
+    recent call. This lets a `Callback` report per-event physics metrics
+    without triggering a second forward pass.
+    """
+
+    def __init__(
+        self,
+        loss_function: LossFunction,
+        metric_name: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Construct `PerEventRecordingLoss`.
+
+        Args:
+            loss_function: The loss function to delegate to.
+            metric_name: Label under which consumers - e.g.
+                `PhysicsMetricsCallback` - locate this wrapper among a model's
+                loss functions.
+            kwargs: Additional arguments passed to `LossFunction`.
+        """
+        super().__init__(**kwargs)
+        self._loss_function = loss_function
+        self.metric_name = metric_name
+        self.last_prediction: Optional[Tensor] = None
+        self.last_target: Optional[Tensor] = None
+        self.last_elements: Optional[Tensor] = None
+
+    def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        """Delegate to the wrapped loss, recording its inputs and output."""
+        elements = self._loss_function._forward(prediction, target)
+        with torch.no_grad():
+            self.last_prediction = prediction.detach()
+            self.last_target = target.detach()
+            self.last_elements = elements.detach()
+        return elements
