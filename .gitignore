@@ -162,3 +162,10 @@ data/examples/output/
 !/data/tests/prometheus/22980001_photons.parquet
 # Notebooks
 **.ipynb
+
+# IceMix run artifacts. Training writes to $OUTPUT_ROOT (default ./outputs),
+# `seeded_event_splits --split-cache-dir` to .split_cache, and slurm/verify.sh
+# to slurm/logs. None of it belongs in the repo.
+/outputs/
+/.split_cache/
+/slurm/logs/
