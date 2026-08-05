@@ -39,6 +39,7 @@ from multiprocessing import get_context
 import numpy as np
 import torch
 from torch.utils.data import Sampler, BatchSampler
+from torch.utils.data.distributed import DistributedSampler
 from graphnet.data.dataset import Dataset
 from graphnet.utilities.logging import Logger
 
@@ -290,3 +291,171 @@ class LenMatchBatchSampler(BatchSampler, Logger):
 
             if len(batch) > 0 and not self.drop_last:
                 yield batch
+
+
+class LengthGroupedSampler(DistributedSampler):
+    """Order events so that neighbouring indices have similar pulse counts.
+
+    `array_to_sequence` pads every batch to its longest event, and a random
+    batch of 256 almost always holds one at the `max_pulses` cap: over the
+    full 10.4 M sample the mean padded length is 252 to carry 37 real pulses,
+    so ~85% of the tokens -- and ~98% of the `L**2` terms the relative-position
+    encoder builds -- are padding. This shuffles, cuts the shuffled order into
+    megabatches, and sorts each megabatch by pulse count, so the `batch_size`
+    consecutive indices the `DataLoader` turns into a batch are length-matched.
+    Mean padded length at the default `group_factor` is 46.
+
+    A megabatch is a whole number of *global* steps -- `group_factor *
+    batch_size * num_replicas` -- so a rank's batch never straddles two of
+    them and every rank reads the same window of the same sorted block. That
+    matters at least as much as the grouping itself: a DDP step costs what its
+    slowest rank costs, so a scheme that hands each rank an independently drawn
+    length spends every step at the *maximum* of `num_replicas` draws. Grouping
+    into hard length buckets and then giving rank `r` every `r`-th batch scores
+    a mean padded length of 44 per rank but 115 per step.
+
+    Nothing is dropped. `DistributedSampler` pads the index list by repetition
+    so that every rank gets exactly `num_samples`; with `drop_last=False` on
+    the `DataLoader` every rank also yields the same number of batches, so no
+    collective can go unmatched.
+
+    Compared to `LenMatchBatchSampler`, which also batches by length: lengths
+    come from an array supplied by the caller (see
+    `graphnet.data.utilities.lengths`) rather than from `data_source[idx]`,
+    which would rebuild every event in the dataset once per epoch.
+    """
+
+    def __init__(
+        self,
+        lengths: Sequence[int],
+        batch_size: int,
+        num_replicas: Optional[int] = None,
+        rank: Optional[int] = None,
+        shuffle: bool = True,
+        seed: int = 42,
+        group_factor: int = 16,
+    ) -> None:
+        """Construct `LengthGroupedSampler`.
+
+        Args:
+            lengths: Number of pulses of each event, indexed the way the
+                `Dataset` is indexed. For an `EnsembleDataset` that is the
+                concatenation of the constituents' selections, which is what
+                `graphnet.data.utilities.lengths.event_lengths` returns.
+            batch_size: Events per batch, per rank. Must match the
+                `DataLoader`'s, or a batch will straddle two megabatches.
+            num_replicas: Number of ranks. Read from the process group when
+                omitted, which requires the group to already exist -- pass it
+                explicitly when building dataloaders before `Trainer.fit`.
+            rank: This process' rank. Likewise.
+            shuffle: Reshuffle every epoch. Set False for validation, so that
+                batch composition -- and hence `val_loss` -- is stable across
+                epochs.
+            seed: Base seed. The shuffle uses `seed + epoch`, and every rank
+                must pass the same value or they will disagree about the order.
+            group_factor: Megabatch size, counted in global steps. Larger is
+                tighter, and faster; smaller leaves batches more
+                heterogeneous. 1 reproduces random batching, 8 gives a mean
+                padded length of 58, 16 gives 46, 50 gives 39.
+
+                This is also the accuracy dial, and the quantity to watch is
+                the spread *within a global step*, not within one rank's
+                batch: DDP averages the gradients, so what the optimiser
+                actually sees is `batch_size * num_replicas` events. Measured
+                on the real pulse counts at batch 256 over 8 ranks, the
+                standard deviation of event length within one optimiser step
+                is 40.6 for random batching, 8.9 at `group_factor=8`, 4.9 at
+                16 and 1.6 at 50. Grouping tightly enough to remove the
+                padding necessarily makes each update's sample more
+                length-homogeneous, and hence each update less like a draw
+                from the full event population; there is no setting that
+                avoids the trade. `accumulate_grad_batches` recovers the
+                diversity for free if it is needed, because consecutive steps
+                are at unrelated lengths once they have been permuted.
+        """
+        if batch_size < 1:
+            raise ValueError(f"`batch_size` must be >= 1. Got {batch_size}.")
+        if group_factor < 1:
+            raise ValueError(
+                f"`group_factor` must be >= 1. Got {group_factor}."
+            )
+
+        lengths_array = np.asarray(lengths, dtype=np.int64)
+        # The base class only ever calls `len()` on `dataset`, so the length
+        # array stands in for it and no `Dataset` has to be built here.
+        super().__init__(
+            lengths_array,  # type: ignore[arg-type]
+            num_replicas=num_replicas,
+            rank=rank,
+            shuffle=shuffle,
+            seed=seed,
+            drop_last=False,
+        )
+        self._lengths = lengths_array
+        # One global step: what all ranks together consume per optimiser step.
+        self._step = batch_size * self.num_replicas
+        self._megabatch = group_factor * self._step
+
+    def __iter__(self) -> Iterator[int]:
+        """Return this rank's share of the epoch, grouped by pulse count."""
+        if self.shuffle:
+            generator = torch.Generator()
+            generator.manual_seed(self.seed + self.epoch)
+            order = torch.randperm(
+                len(self._lengths), generator=generator
+            ).numpy()
+        else:
+            order = np.arange(len(self._lengths))
+
+        # Repeat from the front to reach `total_size`, as `DistributedSampler`
+        # does, so every rank gets `num_samples` and nothing is dropped.
+        if self.total_size != len(order):
+            order = np.resize(order, self.total_size)
+
+        order = np.concatenate(
+            [
+                block[np.argsort(-self._lengths[block], kind="stable")]
+                for block in (
+                    order[start : start + self._megabatch]
+                    for start in range(0, self.total_size, self._megabatch)
+                )
+            ]
+        )
+
+        # Permute whole global steps.
+        #
+        # A sorted megabatch is otherwise walked in descending length order:
+        # the first step of each block carries the longest events in it and the
+        # last the shortest, a sawtooth of period `group_factor`. Measured on
+        # the real pulse counts at `group_factor=16`, that is a +0.34
+        # correlation between the mean event length of consecutive optimiser
+        # steps, sweeping from ~170 pulses to ~9 and back every sixteen steps.
+        # The optimiser sees a systematically non-stationary input and the
+        # logged loss oscillates with it.
+        #
+        # Permuting *whole* steps fixes it (+0.34 -> 0.00) and costs nothing:
+        # what is inside a step does not move, so all ranks still read one
+        # length and the padding is unchanged. Every rank draws the same
+        # permutation from the same seed, which is what keeps them in step.
+        #
+        # With `shuffle=False` the permutation is seeded from `seed` alone, so
+        # validation batches are identical across epochs -- but still
+        # permuted, because an unpermuted prefix is all long events and
+        # `--limit-val-batches` takes a prefix.
+        n_steps = self.total_size // self._step
+        if n_steps > 1:
+            step_generator = torch.Generator()
+            step_generator.manual_seed(
+                self.seed + self.epoch if self.shuffle else self.seed
+            )
+            permutation = torch.randperm(
+                n_steps, generator=step_generator
+            ).numpy()
+            head = order[: n_steps * self._step].reshape(n_steps, self._step)
+            order = np.concatenate(
+                [head[permutation].reshape(-1), order[n_steps * self._step :]]
+            )
+
+        return iter(
+            order[self.rank : self.total_size : self.num_replicas].tolist()
+        )

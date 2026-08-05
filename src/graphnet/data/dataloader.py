@@ -38,17 +38,26 @@ class DataLoader(torch.utils.data.DataLoader):
         **kwargs: Any,
     ) -> None:
         """Construct `DataLoader`."""
-        # Base class constructor
-        super().__init__(
-            dataset,
-            batch_size=batch_size,
-            shuffle=shuffle,
+        # `batch_sampler` already encodes batch size, ordering and remainder
+        # handling, so `torch` rejects it alongside `batch_size`, `shuffle`,
+        # `sampler` or `drop_last`. Drop those rather than make every caller
+        # that wants a custom batching scheme reach past this class.
+        common = dict(
             num_workers=num_workers,
             collate_fn=collate_fn,
             persistent_workers=persistent_workers,
             prefetch_factor=prefetch_factor,
-            **kwargs,
         )
+        if kwargs.get("batch_sampler") is not None:
+            super().__init__(dataset, **common, **kwargs)
+        else:
+            super().__init__(
+                dataset,
+                batch_size=batch_size,
+                shuffle=shuffle,
+                **common,
+                **kwargs,
+            )
 
     @classmethod
     def from_dataset_config(
