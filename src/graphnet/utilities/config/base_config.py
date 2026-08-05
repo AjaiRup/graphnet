@@ -30,6 +30,13 @@ class BaseConfig(BaseModel):
         """Save BaseConfig to `path` as YAML file, or return as string."""
         config_dict = self.as_dict()[self.__class__.__name__]
         yaml_ = yaml.YAML(typ="safe", pure=True)
+        # Wrapping a flow mapping or folding a long scalar leaves a trailing
+        # space on every continuation line, which the repo's own
+        # `trailing-whitespace` hook then strips -- so a config written here
+        # could never be committed as generated. Block style with a width
+        # above the longest natural line avoids both.
+        yaml_.default_flow_style = False
+        yaml_.width = 120
         if path:
             if not path.endswith(CONFIG_FILES_SUFFIXES):
                 path += CONFIG_FILES_SUFFIXES[0]
