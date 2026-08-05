@@ -81,13 +81,20 @@ class SinusoidalPosEmb(LightningModule):
             raise ValueError(f"dim has to be even. Got: {dim}")
         self.scale = nn.Parameter(torch.ones(1) * dim**-0.5) if scaled else 1.0
         self.dim = dim
-        self.n_freq = torch.Tensor([n_freq])
+        # A buffer rather than a plain attribute, so `.to(device)` in `Module`
+        # moves it once instead of the forward pass copying it host-to-device
+        # on every call -- five such copies per `DeepIce` forward.
+        # `persistent=False` keeps it out of `state_dict`, so checkpoints
+        # written before this change still load.
+        self.register_buffer(
+            "n_freq", torch.tensor([float(n_freq)]), persistent=False
+        )
 
     def forward(self, x: Tensor) -> Tensor:
         """Forward pass."""
         device = x.device
         half_dim = self.dim / 2
-        emb = torch.log(self.n_freq.to(device=device)) / half_dim
+        emb = torch.log(self.n_freq) / half_dim
         emb = torch.exp(torch.arange(half_dim, device=device) * (-emb))
         emb = x.unsqueeze(-1) * emb.unsqueeze(0)
         emb = torch.cat((torch.sin(emb), torch.cos(emb)), dim=-1)
@@ -190,8 +197,13 @@ class FourierEncoder(LightningModule):
         if self.n_features >= 6:
             embeddings.append(self.aux_emb(x[:, :, 5].long()))  # Auxiliary
 
+        # `x.shape[1]` rather than `max(seq_length)`: `array_to_sequence` pads
+        # to exactly `seq_length.max()`, so the two are identical -- but
+        # `seq_length` is a CUDA tensor, and the builtin `max` iterates it,
+        # calling `__bool__` (i.e. `.item()`, i.e. a device synchronisation) on
+        # every comparison. That was 256 of the 279 syncs per training step.
         embeddings.append(
-            self.sin_emb2(length).unsqueeze(1).expand(-1, max(seq_length), -1)
+            self.sin_emb2(length).unsqueeze(1).expand(-1, x.shape[1], -1)
         )  # Length
 
         x = torch.cat(embeddings, -1)
