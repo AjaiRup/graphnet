@@ -52,6 +52,7 @@ truth:
   - interaction_type
   - inelasticity
   - stopped_muon
+  - oneweight
 index_column: event_no
 truth_table: truth
 labels:

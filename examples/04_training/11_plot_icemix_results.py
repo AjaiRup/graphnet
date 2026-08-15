@@ -145,5 +145,5 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-dir", default="outputs/plots")
 
-    args, _ = parser.parse_known_args()
+    args = parser.parse_args()
     main(args)

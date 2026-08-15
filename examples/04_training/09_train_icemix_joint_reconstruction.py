@@ -58,6 +58,13 @@ from graphnet.data.utilities.splits import seeded_event_splits
 POSITION_LABELS = ["position_x", "position_y", "position_z"]
 FEATURES = ["dom_x", "dom_y", "dom_z", "dom_time", "charge", "hlc"]
 
+CURSOR_PREDICTION_ALIASES = {
+    "position_x_pred": "pos_x_pred",
+    "position_y_pred": "pos_y_pred",
+    "position_z_pred": "pos_z_pred",
+    "direction_kappa": "dir_kappa_pred",
+}
+
 # Metres per unit of the standardized position targets.
 POSITION_SCALE_M = 100.0
 
@@ -108,6 +115,13 @@ def unscale_position_sigma(x):  # type: ignore[no-untyped-def]
     x[:, 2] = x[:, 2] * 100.0 - 350.0
     x[:, 3] = x[:, 3].exp() * 100.0
     return x
+
+
+def add_cursor_prediction_aliases(results):  # type: ignore[no-untyped-def]
+    """Add the prediction names consumed by the cursor plotting scripts."""
+    for source, target in CURSOR_PREDICTION_ALIASES.items():
+        results[target] = results[source]
+    return results
 
 
 class FrozenTrunkEvalCallback(Callback):
@@ -664,6 +678,7 @@ def main(args: Any) -> None:
         "energy",
         "pid",
         "interaction_type",
+        "oneweight",
         dataset_config.index_column,
     ]
     results = model.predict_as_dataframe(
@@ -691,6 +706,7 @@ def main(args: Any) -> None:
     if rank_zero_only.rank == 0:
         predictions_dir = os.path.join(output_dir, "predictions")
         os.makedirs(predictions_dir, exist_ok=True)
+        results = add_cursor_prediction_aliases(results)
         results.to_csv(
             os.path.join(predictions_dir, "results.csv"), index=False
         )

@@ -1,8 +1,4 @@
-"""Resolution plots for reconstruction results.
-
-Reads the `results.csv` written by `Model.predict_as_dataframe`, so it applies
-to any GraphNeT model predicting a direction and/or a vertex.
-"""
+"""Resolution plots for joint direction and vertex reconstruction."""
 
 import glob
 import os
@@ -20,6 +16,7 @@ CHARGED_CURRENT = 1
 DEFAULT_ENERGY_BINS = 20
 DEFAULT_LOG_ENERGY_RANGE = (1.0, 4.0)
 DEFAULT_PERCENTILES = (16, 50, 84)
+MIN_EVENTS_PER_BIN = 6
 
 EVENT_CLASSES = ("all", "tracks", "cascades")
 
@@ -27,6 +24,13 @@ _RUN_NAME_PATTERN = re.compile(
     r"^(?P<project>.*?)_\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}"
     r"(?:_job-(?P<job_id>\d+))?$"
 )
+
+_CURSOR_PREDICTION_COLUMNS = {
+    "pos_x_pred": "position_x_pred",
+    "pos_y_pred": "position_y_pred",
+    "pos_z_pred": "position_z_pred",
+    "dir_kappa_pred": "direction_kappa",
+}
 
 
 # Physics quantities
@@ -101,8 +105,9 @@ def binned_statistics(
     n_bins: int = DEFAULT_ENERGY_BINS,
     log_energy_range: Tuple[float, float] = DEFAULT_LOG_ENERGY_RANGE,
     percentiles: Sequence[float] = DEFAULT_PERCENTILES,
+    min_events: int = MIN_EVENTS_PER_BIN,
 ) -> pd.DataFrame:
-    """Return `percentiles` of `values` in bins of log10 energy."""
+    """Return fixed-bin percentiles, requiring ``min_events`` per bin."""
     log_energy = np.log10(np.asarray(energy, dtype=float))
     edges = np.linspace(*log_energy_range, n_bins + 1)
     indices = np.digitize(log_energy, edges) - 1
@@ -110,20 +115,21 @@ def binned_statistics(
     rows = []
     for index in range(n_bins):
         selected = np.asarray(values)[indices == index]
-        if selected.size == 0:
-            continue
         row = {
             "log_energy": 0.5 * (edges[index] + edges[index + 1]),
             "count": selected.size,
         }
-        row.update(
-            {
-                f"p{int(percentile)}": float(
-                    np.percentile(selected, percentile)
-                )
-                for percentile in percentiles
-            }
-        )
+        if selected.size >= min_events:
+            row.update(
+                {
+                    f"p{int(percentile)}": float(
+                        np.percentile(selected, percentile)
+                    )
+                    for percentile in percentiles
+                }
+            )
+        else:
+            row.update({f"p{int(percentile)}": np.nan for percentile in percentiles})
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -155,8 +161,15 @@ def find_results(base_dir: str) -> Dict[str, str]:
 
 
 def load_results(path: str, required: Sequence[str] = ()) -> pd.DataFrame:
-    """Load a results CSV, checking the columns the plots need."""
+    """Load current or cursor-format results, checking required columns."""
     results = pd.read_csv(path)
+    rename = {
+        source: target
+        for source, target in _CURSOR_PREDICTION_COLUMNS.items()
+        if source in results and target not in results
+    }
+    if rename:
+        results = results.rename(columns=rename)
     missing = [column for column in required if column not in results.columns]
     if missing:
         raise KeyError(f"{path} is missing column(s) {missing}")
@@ -254,6 +267,7 @@ def plot_resolution_vs_energy(
         axis.set_title(f"{metric.replace('_', ' ').title()} - {event_class}")
         axis.legend()
         axis.grid(alpha=0.3)
+        axis.set_yscale("log")
         if ratio_axis is not None:
             ratio_axis.axhline(1.0, color="black", linewidth=0.8)
             ratio_axis.set_ylabel(f"/ {reference}")
