@@ -1,9 +1,7 @@
 """Generate resolution plots for one or more IceMix runs.
 
-Replaces the physics team's `generate_plots.py` driver and the three scripts it
-shelled out to (`plot_run.py`, `plot_master.py`, `plot_reference.py`), plus
-`plot_resilience_test.py`. All of the plotting logic now lives in
-`graphnet.utilities.plotting`; this is just the command line around it.
+The plotting logic lives in `graphnet.utilities.plotting`; this is the
+command line around it.
 
     # every run under outputs/, compared against a named baseline
     python examples/04_training/11_plot_icemix_results.py \
@@ -119,10 +117,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--reference-csv",
         default=None,
-        help=(
-            "External baseline predictions to include, e.g. a TANGO results "
-            "CSV. The physics team hardcoded this path; it is an argument now."
-        ),
+        help="External baseline predictions to include as a reference curve.",
     )
     parser.add_argument("--reference-label", default="baseline")
     parser.add_argument(

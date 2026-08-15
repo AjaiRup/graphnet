@@ -126,12 +126,8 @@ class DeepIce(GNN):
                 before sinusoidal encoding.
             n_freq: Number of frequencies of the sinusoidal embeddings.
             norm_cls: If True, apply a `LayerNorm` to the CLS token before
-                returning it. Dropout and drop-path make the CLS scale differ
-                between train and eval mode, and a scale-sensitive task head
-                (e.g. an affine position head) turns that difference into a
-                systematic offset that gradients, which only flow in train
-                mode, can never correct. Normalising the readout pins its
-                scale in both modes. Default False, the upstream behaviour.
+                returning it, pinning the readout scale across train/eval
+                modes for scale-sensitive task heads. Default False.
         """
         super().__init__(seq_length, hidden_dim)
         if relative_encoder not in ("spacetime", "mahalanobis"):

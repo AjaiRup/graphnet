@@ -101,6 +101,23 @@ class DirectionReconstructionWithKappaDecoupled(StandardLearnedTask):
         return torch.stack((vec_x, vec_y, vec_z, kappa), dim=1)
 
 
+class PositionReconstructionWithSigma(StandardLearnedTask):
+    """Reconstruct vertex position and isotropic log-sigma."""
+
+    default_target_labels = ["position_x", "position_y", "position_z"]
+    default_prediction_labels = [
+        "position_x_pred",
+        "position_y_pred",
+        "position_z_pred",
+        "position_sigma",
+    ]
+    nb_inputs = 4
+
+    def _forward(self, x: Tensor) -> Tensor:
+        # Keep the NLL finite under mixed precision.
+        return torch.cat([x[:, :3], x[:, 3:4].clamp(-4.0, 4.0)], dim=1)
+
+
 class ZenithReconstruction(StandardLearnedTask):
     """Reconstructs zenith angle."""
 

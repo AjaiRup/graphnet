@@ -43,3 +43,40 @@ This subfolder contains two main training scripts:
     --model-config configs/models/example_direction_reconstruction_model.yml  \
     --prediction-names zenith_pred zenith_kappa_pred azimuth_pred azimuth_kappa_pred
 ```
+
+## IceMix joint reconstruction
+
+`09_train_icemix_joint_reconstruction.py` trains direction and vertex position
+with a shared IceMix backbone. Use the versioned Slurm launcher with a directory
+containing `nue.db`, `numu.db`, and `nutau.db`:
+
+```bash
+export DATA_ROOT=/path/to/databases
+export OUTPUT_ROOT=$PWD/outputs
+
+RUN_NAME=icemix-stage1 \
+sbatch -A <account> -q <qos> --gres=gpu:l40s:8 \
+    slurm/train_icemix.sh --seed 42 --max-epochs 100 \
+    --rotation-augmentation --length-cache-dir "$OUTPUT_ROOT/benchmarks" \
+    --split-cache-dir "$OUTPUT_ROOT/splits"
+```
+
+Select the Stage-1 checkpoint by the median direction error for events with
+energy at least 10 GeV, then calibrate vertex uncertainty without updating the
+backbone:
+
+```bash
+RUN_NAME=icemix-stage2 \
+sbatch -A <account> -q <qos> --gres=gpu:l40s:8 \
+    slurm/train_icemix.sh --seed 42 --max-epochs 3 --lr 1e-3 \
+    --stage2-from "$OUTPUT_ROOT/icemix-stage1/checkpoints/best-direction-65.ckpt" \
+    --length-cache-dir "$OUTPUT_ROOT/benchmarks" \
+    --split-cache-dir "$OUTPUT_ROOT/splits"
+```
+
+`configs/models/icemix_joint_reconstruction.yml` and
+`configs/models/icemix_joint_reconstruction_stage2.yml` record the approved
+architectures. Checkpoints, predictions, W&B logs, and caches remain external
+artifacts. The approved runs are `final-seed42-rot-100` (W&B `2hg0nbcy`) and
+`final-seed42-rot-100-stage2` (W&B `qrnot5gb`); both were created from commit
+`aba079ec`.

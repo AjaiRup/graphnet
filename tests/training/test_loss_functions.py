@@ -7,7 +7,11 @@ import warnings
 from torch import Tensor
 from torch.autograd import grad
 
-from graphnet.training.loss_functions import LogCoshLoss, VonMisesFisherLoss
+from graphnet.training.loss_functions import (
+    IsotropicGaussianNLLLoss,
+    LogCoshLoss,
+    VonMisesFisherLoss,
+)
 from graphnet.utilities.maths import eps_like
 
 
@@ -66,6 +70,27 @@ def test_log_cosh(dtype: torch.dtype = torch.float32) -> None:
     assert torch.allclose(
         losses_reference[reference_is_valid], losses[reference_is_valid]
     )
+
+
+def test_isotropic_gaussian_nll_and_detached_position() -> None:
+    """Check the Stage-2 loss formula and frozen-position mode."""
+    prediction = torch.tensor(
+        [[1.0, -1.0, 2.0, 0.0], [3.0, 2.0, -2.0, np.log(2.0)]],
+        requires_grad=True,
+    )
+    target = torch.tensor([[0.0, 1.0, 2.0], [1.0, 2.0, -2.0]])
+    loss = IsotropicGaussianNLLLoss(detach_position=True)(
+        prediction, target, return_elements=True
+    )
+
+    squared = torch.tensor([5.0, 4.0])
+    log_sigma = prediction.detach()[:, 3]
+    expected = 3 * log_sigma + 0.5 * squared * torch.exp(-2 * log_sigma)
+    assert torch.allclose(loss, expected.float())
+
+    loss.sum().backward()
+    assert torch.equal(prediction.grad[:, :3], torch.zeros(2, 3))
+    assert torch.all(prediction.grad[:, 3].abs() > 0)
 
 
 def test_von_mises_fisher_exact_m3(dtype: torch.dtype = torch.float64) -> None:

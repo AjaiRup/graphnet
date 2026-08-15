@@ -420,17 +420,12 @@ class IceMixNodes(NodeDefinition):
         else:
             ids = torch.randperm(event_length)
             if self.hlc_name is not None:
-                auxiliary_n = torch.nonzero(
-                    x[:, self.feature_indexes[self.hlc_name]] == 0
-                ).squeeze(1)
-                auxiliary_p = torch.nonzero(
-                    x[:, self.feature_indexes[self.hlc_name]] == 1
-                ).squeeze(1)
-                ids_n = ids[auxiliary_n][
-                    : min(self.max_length, len(auxiliary_n))
-                ]
-                ids_p = ids[auxiliary_p][
-                    : min(self.max_length - len(ids_n), len(auxiliary_p))
+                # Classify the shuffled ids so class-0 pulses are kept
+                # preferentially.
+                shuffled_hlc = x[ids, self.feature_indexes[self.hlc_name]]
+                ids_n = ids[shuffled_hlc == 0][: self.max_length]
+                ids_p = ids[shuffled_hlc == 1][
+                    : self.max_length - len(ids_n)
                 ]
 
                 ids = torch.cat([ids_n, ids_p]).sort().values

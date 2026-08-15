@@ -2,7 +2,7 @@
 
 import logging
 import os
-from typing import Dict, List, Tuple, TYPE_CHECKING, Any, Optional
+from typing import Dict, List, Set, Tuple, TYPE_CHECKING, Any, Optional
 import warnings
 
 import numpy as np
@@ -473,17 +473,12 @@ class PhysicsMetricsCallback(Callback):
     - `vmf_calibration`: `angular_error_rad * sqrt(kappa)`, which concentrates
       around a fixed value when `kappa` is well calibrated,
 
-    for both the training and validation split. Loss values alone hide whether
-    a drop is coming from the direction or the vertex head, and averages hide
-    the tails that matter for physics.
+    for both the training and validation split, plus `position_sigma_m` and
+    `position_pull` when the position head carries a sigma output, and
+    `angular_error_deg_sel` over events above `sel_energy_min`.
 
-    Metrics are read off `PerEventRecordingLoss` wrappers around the tasks'
-    loss functions, so no extra forward pass is needed. Wrap the *outermost*
-    loss of each task - the recorded prediction and target are what the metrics
-    are derived from, so any weighting or `EnsembleLoss` composition inside the
-    wrapper is transparent to this callback. Accumulation is over a full epoch
-    and is DDP-safe (`dist_reduce_fx="cat"`); note this holds one float32 per
-    event per metric on each rank until the epoch ends.
+    Metrics are read off `PerEventRecordingLoss` wrappers (wrap each
+    task's *outermost* loss). Accumulation is epoch-wide and DDP-safe.
     """
 
     def __init__(
@@ -491,6 +486,7 @@ class PhysicsMetricsCallback(Callback):
         position_loss_name: str = "position",
         direction_loss_name: str = "direction",
         position_scale: float = 1.0,
+        sel_energy_min: Optional[float] = 10.0,
     ) -> None:
         """Construct `PhysicsMetricsCallback`.
 
@@ -500,26 +496,36 @@ class PhysicsMetricsCallback(Callback):
                 vertex metrics.
             direction_loss_name: `metric_name` of the `PerEventRecordingLoss`
                 wrapping the direction loss.
-            position_scale: Metres per unit of the recorded position values.
-                The recorder captures what the loss sees, so when the task
-                standardizes its targets (`transform_target`), the recorded
-                values are in transformed units and `position_error_m` needs
-                this factor to stay in metres. Offsets cancel in the
-                difference, so a scalar suffices for a uniform per-axis scale.
+            position_scale: Metres per unit of the recorded (transformed)
+                position values.
+            sel_energy_min: True-energy threshold for
+                `angular_error_deg_sel`. None disables the metric.
         """
         super().__init__()
         self._position_loss_name = position_loss_name
         self._direction_loss_name = direction_loss_name
         self._position_scale = position_scale
+        self._sel_energy_min = sel_energy_min
         self._keys = (
             "position_error_m",
+            "position_sigma_m",
+            "position_pull",
             "angular_error_deg",
+            "angular_error_deg_sel",
             "kappa",
             "vmf_calibration",
         )
         self._metrics: Dict[str, Dict[str, PerEventStats]] = {
             phase: {key: PerEventStats() for key in self._keys}
             for phase in ("train", "val")
+        }
+        self._optional_keys = {
+            "position_sigma_m",
+            "position_pull",
+            "angular_error_deg_sel",
+        }
+        self._applicable: Dict[str, Set[str]] = {
+            phase: set() for phase in ("train", "val")
         }
 
     @staticmethod
@@ -537,7 +543,7 @@ class PhysicsMetricsCallback(Callback):
         }
 
     def _per_event_values(
-        self, pl_module: LightningModule
+        self, pl_module: LightningModule, batch: Any = None
     ) -> Dict[str, Optional[Tensor]]:
         recorders = self._recorders(pl_module)
         values: Dict[str, Optional[Tensor]] = {key: None for key in self._keys}
@@ -559,6 +565,17 @@ class PhysicsMetricsCallback(Callback):
                     prediction[:, :3] - target[:, :3], dim=1
                 )
             )
+            if prediction.size(1) >= 4:
+                # Fourth column is log(sigma). `position_pull` follows a
+                # chi(3) when calibrated: median ~1.538.
+                sigma = prediction[:, 3].exp()
+                values["position_sigma_m"] = self._position_scale * sigma
+                values["position_pull"] = (
+                    torch.linalg.vector_norm(
+                        prediction[:, :3] - target[:, :3], dim=1
+                    )
+                    / sigma
+                )
 
         direction = recorders.get(self._direction_loss_name)
         if (
@@ -577,14 +594,32 @@ class PhysicsMetricsCallback(Callback):
             values["kappa"] = kappa
             values["vmf_calibration"] = angle * kappa.clamp_min(0.0).sqrt()
 
+            # Recorder rows align with the batch of the same step.
+            energy = (
+                getattr(batch, "energy", None) if batch is not None else None
+            )
+            if (
+                self._sel_energy_min is not None
+                and energy is not None
+                and energy.numel() == prediction.size(0)
+            ):
+                selected = energy >= self._sel_energy_min
+                values["angular_error_deg_sel"] = values["angular_error_deg"][
+                    selected
+                ]
+
         return values
 
-    def _update(self, pl_module: LightningModule, phase: str) -> None:
+    def _update(
+        self, pl_module: LightningModule, phase: str, batch: Any = None
+    ) -> None:
         device = getattr(pl_module, "device", torch.device("cpu"))
-        values = self._per_event_values(pl_module)
+        values = self._per_event_values(pl_module, batch=batch)
         for key, metric in self._metrics[phase].items():
             if metric.device != device:
                 metric.to(device)
+            if values[key] is not None:
+                self._applicable[phase].add(key)
             metric.update(values[key])
 
     @staticmethod
@@ -614,13 +649,14 @@ class PhysicsMetricsCallback(Callback):
         metrics: Dict[str, float] = {}
         for key, metric in self._metrics[phase].items():
             stats = metric.compute()
+            metric.reset()
+            if key in self._optional_keys and key not in self._applicable[phase]:
+                continue
             for index, suffix in enumerate(PerEventStats.SUFFIXES):
                 metrics[f"{phase}/{key}_{suffix}"] = float(stats[index].item())
-            metric.reset()
 
-        # `ModelCheckpoint` and `EarlyStopping` read `trainer.callback_metrics`
-        # which direct `logger.log_metrics` calls bypass. `compute()` above
-        # gathered across ranks, so every rank writes identical values here.
+        # `ModelCheckpoint`/`EarlyStopping` read `trainer.callback_metrics`,
+        # which direct `logger.log_metrics` calls bypass.
         if trainer is not None and metrics:
             trainer.callback_metrics.update(
                 {key: torch.tensor(value) for key, value in metrics.items()}
@@ -640,6 +676,7 @@ class PhysicsMetricsCallback(Callback):
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Reset the training metrics."""
+        self._applicable["train"].clear()
         for metric in self._metrics["train"].values():
             metric.reset()
 
@@ -647,6 +684,7 @@ class PhysicsMetricsCallback(Callback):
         self, trainer: Trainer, pl_module: LightningModule
     ) -> None:
         """Reset the validation metrics."""
+        self._applicable["val"].clear()
         for metric in self._metrics["val"].values():
             metric.reset()
 
@@ -659,7 +697,7 @@ class PhysicsMetricsCallback(Callback):
         batch_idx: int,
     ) -> None:
         """Accumulate the training metrics of this batch."""
-        self._update(pl_module, "train")
+        self._update(pl_module, "train", batch=batch)
 
     def on_validation_batch_end(
         self,
@@ -671,7 +709,7 @@ class PhysicsMetricsCallback(Callback):
         dataloader_idx: int = 0,
     ) -> None:
         """Accumulate the validation metrics of this batch."""
-        self._update(pl_module, "val")
+        self._update(pl_module, "val", batch=batch)
 
     def on_train_epoch_end(
         self, trainer: Trainer, pl_module: LightningModule

@@ -1,8 +1,8 @@
 # IceCube-86 joint direction + vertex reconstruction.
 #
 # Set DATA_ROOT before use; the training entry point expands it.
-# `selection: null` hands the split to `seeded_event_splits`,
-# reproducing the physics team's seed-42 80/10/10 partition.
+# `selection: null` hands the split to `seeded_event_splits`' seeded
+# 80/10/10 partition.
 path:
   - $DATA_ROOT/nue.db
   - $DATA_ROOT/numu.db
@@ -28,11 +28,9 @@ data_representation:
     add_static_features: false
 pulsemaps:
   - SRTInIcePulses
-# Column 5 is `hlc`. `graphnet-cursor` puts `rde` there instead, and
-# reconstructs the vertex markedly better at matched direction performance --
-# see icecube86_joint_reconstruction_rde.yml, which is the A/B for that.
-# `pmt_area` is the column that genuinely never reaches a layer: it would sit
-# at index 6, past `n_features` 6.
+# Column 5 (`hlc`) is embedded as a binary flag by `FourierEncoder`.
+# `pmt_area` would sit at index 6, past `n_features`, and never reaches a
+# layer.
 features:
   - dom_x
   - dom_y

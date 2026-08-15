@@ -14,9 +14,7 @@ import pandas as pd
 
 from graphnet.utilities.logging import Logger
 
-ELECTRON_NEUTRINO_PID = 12
 MUON_NEUTRINO_PID = 14
-TAU_NEUTRINO_PID = 16
 CHARGED_CURRENT = 1
 
 DEFAULT_ENERGY_BINS = 20
@@ -178,8 +176,7 @@ def plot_resolution_vs_energy(
     """Plot `metric` against energy, one figure per event class.
 
     When `reference` names one of `named_results`, a lower panel shows each
-    curve as a ratio to it - the view that actually answers "is this run
-    better than the baseline?".
+    curve as a ratio to it.
     """
     import matplotlib
 

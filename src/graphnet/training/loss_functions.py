@@ -273,26 +273,9 @@ class LogCMK(torch.autograd.Function):
         ctx.dtype = dtype
         kappa = kappa.double()
         if m == 3:
-            # $I_{1/2}(k) = \\sqrt{2/(\\pi k)}\\sinh k$ collapses this to
-            # $\\log k - \\log\\sinh k - \\log 4\\pi$, so three dimensions need
-            # no Bessel function and therefore no host round-trip. `log1p`
-            # keeps `sinh` from overflowing. Agrees with the `scipy` branch to
-            # 6e-12 relative over kappa in [1e-6, 700].
-            #
-            # The reason to prefer it is robustness, not speed. It stays
-            # finite above kappa 700, where `scipy.special.iv` overflows to
-            # `inf` and this returns `nan` -- which is what `kappa_switch`
-            # exists to route around, and kappa rises through training
-            # (median 2.9 -> 4.8 over ten epochs).
-            #
-            # The speed argument does not survive measurement. Dropping this
-            # and the guard in `array_to_sequence` took the sync census from
-            # 18 to 11 and the step from 59.0 to 58.2 ms -- a flat 0.8 ms at
-            # every sequence length, i.e. ~0.11 ms per sync, 1.4% at L=48 and
-            # 0.1% at L=256. Removing the three remaining syncs in
-            # `log_cmk` below is worth ~0.34 ms and is not worth changing the
-            # `kappa_switch` contract for. At these shapes 58% of a training
-            # step is outside the model entirely; look there instead.
+            # For m=3 the Bessel function has a closed form, so no host
+            # round-trip; `log1p` keeps it finite above kappa 700, where
+            # `scipy.special.iv` overflows.
             return (
                 torch.log(kappa)
                 - kappa
@@ -368,7 +351,7 @@ class LogCMK(torch.autograd.Function):
             # Initialize gradient array
             grads = np.zeros_like(kappa)
 
-            # Handle small kappa values (including zero) to avoid division by zero
+            # Handle small kappa (including zero) to avoid division by zero
             small_mask = np.abs(kappa) < 1e-6
             grads[small_mask] = -kappa[small_mask] / 3
 
@@ -440,12 +423,7 @@ class VonMisesFisherLoss(LossFunction):
     ) -> Tensor:  # pylint: disable=invalid-name
         """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss exactly.
 
-        `LogCMK` computes the three-dimensional case entirely on the device;
-        only m != 3 reaches `scipy`. That matters for speed rather than
-        accuracy: the `scipy` path moves `kappa` to the host and back in the
-        forward *and* the backward, which is six of the eighteen host-device
-        synchronisation points in a training step, and the observed `kappa`
-        (median ~4.5) puts essentially every event on the exact branch.
+        Only m != 3 reaches `scipy`; m=3 stays on the device.
         """
         return LogCMK.apply(m, kappa)
 
@@ -615,12 +593,30 @@ class EuclideanDistanceLoss(LossFunction):
             + (prediction[:, 1] - target[:, 1]) ** 2
             + (prediction[:, 2] - target[:, 2]) ** 2
         )
-        # The gradient of sqrt is unbounded at zero, so a prediction that
-        # lands exactly on the target would emit a NaN gradient. Clamping
-        # to machine epsilon caps the gradient instead.
+        # Clamp: sqrt has an unbounded gradient at zero.
         return torch.sqrt(
             torch.clamp_min(squared, torch.finfo(squared.dtype).eps)
         )
+
+
+class IsotropicGaussianNLLLoss(LossFunction):
+    """Negative log-likelihood for 3D position and isotropic log-sigma."""
+
+    def __init__(self, detach_position: bool = False, **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._detach_position = detach_position
+
+    def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
+        """Return elementwise NLL terms for [position, log-sigma] inputs."""
+        # The exponential can overflow fp16 at the task's clamp.
+        prediction = prediction.float()
+        target = target.reshape(-1, 3).float()
+        log_sigma = prediction[:, 3]
+        position = prediction[:, :3]
+        if self._detach_position:
+            position = position.detach()
+        squared = ((position - target) ** 2).sum(dim=-1)
+        return 3.0 * log_sigma + 0.5 * squared * torch.exp(-2.0 * log_sigma)
 
 
 class VonMisesFisher3DLoss(VonMisesFisherLoss):
@@ -759,11 +755,8 @@ class NegCosLoss(LossFunction):
 class PerEventRecordingLoss(LossFunction):
     """Transparent wrapper that retains a loss' most recent per-event terms.
 
-    Delegates to `loss_function` unchanged - the returned elements, and hence
-    the gradient, are identical to using `loss_function` directly - while
-    stashing the detached prediction, target and elementwise loss of the most
-    recent call. This lets a `Callback` report per-event physics metrics
-    without triggering a second forward pass.
+    Gradient-identical to the wrapped loss; stashes the detached
+    prediction, target and elementwise terms for metric callbacks.
     """
 
     def __init__(

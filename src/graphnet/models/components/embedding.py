@@ -81,11 +81,8 @@ class SinusoidalPosEmb(LightningModule):
             raise ValueError(f"dim has to be even. Got: {dim}")
         self.scale = nn.Parameter(torch.ones(1) * dim**-0.5) if scaled else 1.0
         self.dim = dim
-        # A buffer rather than a plain attribute, so `.to(device)` in `Module`
-        # moves it once instead of the forward pass copying it host-to-device
-        # on every call -- five such copies per `DeepIce` forward.
-        # `persistent=False` keeps it out of `state_dict`, so checkpoints
-        # written before this change still load.
+        # A buffer so `.to(device)` moves it once; `persistent=False` keeps
+        # older checkpoints loadable.
         self.register_buffer(
             "n_freq", torch.tensor([float(n_freq)]), persistent=False
         )
@@ -195,28 +192,15 @@ class FourierEncoder(LightningModule):
         )  # Time
 
         if self.n_features >= 6:
-            # Threshold rather than cast. `aux_emb` is `nn.Embedding(2, ...)`,
-            # so column 5 has to arrive as an index in {0, 1}. `.long()` gives
-            # that for `hlc`, which the detector passes through as {0.0, 1.0},
-            # but truncates any *standardized* two-valued feature to the wrong
-            # index -- `rde` standardizes to {-1.0, 0.4}, and -1 is not a legal
-            # embedding index at all. Thresholding at zero is exactly
-            # equivalent for `hlc` and correct for either.
-            #
-            # This is lossless only while column 5 is two-valued, which holds
-            # for `hlc` and for `rde` in the oscNext samples (1.0 on standard
-            # IceCube DOMs, 1.35 on DeepCore high-QE DOMs, no other values). A
-            # genuinely continuous sixth feature needs a sinusoidal embedding
-            # here instead, as `graphnet-cursor` uses.
+            # Threshold rather than cast: `aux_emb` needs an index in
+            # {0, 1}, and `.long()` maps standardized two-valued features
+            # (e.g. `rde` at {-1.0, 0.4}) to illegal indices.
             embeddings.append(
                 self.aux_emb((x[:, :, 5] > 0).long())
             )  # Auxiliary
 
-        # `x.shape[1]` rather than `max(seq_length)`: `array_to_sequence` pads
-        # to exactly `seq_length.max()`, so the two are identical -- but
-        # `seq_length` is a CUDA tensor, and the builtin `max` iterates it,
-        # calling `__bool__` (i.e. `.item()`, i.e. a device synchronisation) on
-        # every comparison. That was 256 of the 279 syncs per training step.
+        # `x.shape[1]`, not `max(seq_length)`: identical value, but the
+        # builtin `max` over a CUDA tensor syncs once per comparison.
         embeddings.append(
             self.sin_emb2(length).unsqueeze(1).expand(-1, x.shape[1], -1)
         )  # Length

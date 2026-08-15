@@ -1,19 +1,8 @@
-"""Utilities for reading the number of pulses per event.
+"""Utilities for reading and caching the number of pulses per event.
 
-`LengthGroupedSampler` needs the pulse count of every event before the epoch
-starts, so it can order events by length and hand the `DataLoader` batches that
-are padded to something near their own mean. Reading them the obvious way - by
-constructing each event and asking for `num_nodes`, as `LenMatchBatchSampler`
-does - means building the whole dataset a second time every epoch. These
-helpers read the counts straight from the pulsemap instead, and cache them.
-
-The cache contract mirrors `seeded_event_splits`: a `cache_dir`, one file per
-database, keyed by the database's basename. The two name their files
-differently, so one directory can hold both. The payload is `.npz`
-rather than JSON because the production databases hold ~10.4 M events between
-them; two `int32` arrays of that length are ~83 MB and load in well under a
-second, where the equivalent JSON is ~150 MB and tens of seconds - paid on
-every DDP rank, every run.
+Counts are read straight from the pulsemap rather than by constructing
+events. The cache contract mirrors `seeded_event_splits`: a `cache_dir`,
+one `.npz` file per database, keyed by the database's basename.
 """
 
 import os
@@ -37,9 +26,8 @@ def _cache_path(cache_dir: str, path: str, pulsemap: str) -> str:
     return os.path.join(cache_dir, f"lengths_{stem}.{pulsemap}.npz")
 
 
-# Called once per split per database, on every rank -- nine times a run at
-# three databases. The arrays are never mutated by `event_lengths`, which
-# concatenates into a fresh one, so they are safe to hand out repeatedly.
+# The cached arrays are never mutated by `event_lengths`, so they are safe
+# to hand out repeatedly.
 @lru_cache(maxsize=None)
 def pulse_counts(
     path: str,
@@ -53,10 +41,9 @@ def pulse_counts(
         path: Path to the SQLite database.
         pulsemap: Name of the table holding one row per pulse.
         index_column: Name of the event index column.
-        cache_dir: If given, the counts are read from - and on a miss written
-            to - this directory. Without it the pulsemap is scanned on every
-            call, which is a full covering-index scan: seconds for a
-            well-clustered database, tens of minutes for a fragmented one.
+        cache_dir: If given, counts are read from - and on a miss written
+            to - this directory; without it the pulsemap is scanned on
+            every call.
 
     Returns:
         `(event_no, n_pulses)`, both sorted ascending by `event_no`.
