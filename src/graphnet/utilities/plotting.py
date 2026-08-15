@@ -207,6 +207,16 @@ def resolution_statistics(
     if not tables:
         return pd.DataFrame()
     combined = pd.concat(tables, ignore_index=True)
+    all_counts = combined.loc[
+        combined["event_class"] == "all",
+        ["metric", "run", "log_energy", "count"],
+    ].rename(columns={"count": "all_count"})
+    combined = combined.merge(
+        all_counts,
+        on=["metric", "run", "log_energy"],
+        how="left",
+    )
+    combined["event_fraction"] = combined["count"] / combined["all_count"]
     if reference is None or reference not in named_results:
         return combined
 

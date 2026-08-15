@@ -69,4 +69,5 @@ def test_resolution_statistics_records_counts_and_ratios() -> None:
         & (statistics["event_class"] == "tracks")
         & (statistics["count"] == events)
     ].iloc[0]
+    assert candidate["event_fraction"] == 1.0
     assert candidate["ratio_to_reference"] == 1.0
