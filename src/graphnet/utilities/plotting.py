@@ -177,6 +177,54 @@ def load_results(path: str, required: Sequence[str] = ()) -> pd.DataFrame:
 
 
 # Plots
+def resolution_statistics(
+    named_results: Dict[str, pd.DataFrame],
+    metric: str,
+    event_classes: Sequence[str] = EVENT_CLASSES,
+    reference: Optional[str] = None,
+    n_bins: int = DEFAULT_ENERGY_BINS,
+    log_energy_range: Tuple[float, float] = DEFAULT_LOG_ENERGY_RANGE,
+) -> pd.DataFrame:
+    """Return cursor-style per-bin resolution statistics for each result."""
+    metric_fn, _ = METRICS[metric]
+    tables = []
+    for label, results in named_results.items():
+        for event_class in event_classes:
+            subset = filter_by_class(results, event_class)
+            if subset.empty:
+                continue
+            statistics = binned_statistics(
+                metric_fn(subset),
+                subset["energy"],
+                n_bins=n_bins,
+                log_energy_range=log_energy_range,
+            )
+            statistics.insert(0, "event_class", event_class)
+            statistics.insert(0, "run", label)
+            statistics.insert(0, "metric", metric)
+            tables.append(statistics)
+
+    if not tables:
+        return pd.DataFrame()
+    combined = pd.concat(tables, ignore_index=True)
+    if reference is None or reference not in named_results:
+        return combined
+
+    reference_medians = combined.loc[
+        combined["run"] == reference,
+        ["metric", "event_class", "log_energy", "p50"],
+    ].rename(columns={"p50": "reference_p50"})
+    combined = combined.merge(
+        reference_medians,
+        on=["metric", "event_class", "log_energy"],
+        how="left",
+    )
+    combined["ratio_to_reference"] = combined["p50"] / combined[
+        "reference_p50"
+    ]
+    return combined
+
+
 def plot_resolution_vs_energy(
     named_results: Dict[str, pd.DataFrame],
     metric: str,

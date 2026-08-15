@@ -33,6 +33,7 @@ from graphnet.utilities.plotting import (
     plot_resolution_vs_energy,
     plot_token_drop_sweep,
     plot_training_curve,
+    resolution_statistics,
 )
 
 REQUIRED_COLUMNS = ("energy", "pid", "interaction_type")
@@ -72,6 +73,23 @@ def main(args: Any) -> None:
                 n_bins=args.energy_bins,
                 log_energy_range=tuple(args.log_energy_range),
             )
+        if args.statistics_csv:
+            tables = [
+                resolution_statistics(
+                    named_results,
+                    metric=metric,
+                    reference=args.reference,
+                    n_bins=args.energy_bins,
+                    log_energy_range=tuple(args.log_energy_range),
+                )
+                for metric in args.metrics
+            ]
+            statistics = pd.concat(
+                [table for table in tables if not table.empty],
+                ignore_index=True,
+            )
+            statistics.to_csv(args.statistics_csv, index=False)
+            logger.info(f"Wrote {args.statistics_csv}")
     else:
         logger.warning("No results CSVs found; skipping resolution plots.")
 
@@ -130,6 +148,11 @@ if __name__ == "__main__":
         "--metrics-csv",
         default=None,
         help="`CSVLogger` metrics.csv to plot the training curve from.",
+    )
+    parser.add_argument(
+        "--statistics-csv",
+        default=None,
+        help="Write cursor-style binned metrics and reference ratios to CSV.",
     )
     parser.add_argument(
         "--token-drop-sweep",

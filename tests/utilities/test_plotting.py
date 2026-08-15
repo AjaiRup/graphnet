@@ -2,7 +2,11 @@
 
 import pandas as pd
 
-from graphnet.utilities.plotting import binned_statistics, load_results
+from graphnet.utilities.plotting import (
+    binned_statistics,
+    load_results,
+    resolution_statistics,
+)
 
 
 def test_load_results_normalizes_cursor_prediction_names(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -37,3 +41,32 @@ def test_binned_statistics_matches_cursor_minimum_count() -> None:
 
     assert statistics.loc[statistics["count"] == 5, "p50"].isna().all()
     assert statistics.loc[statistics["count"] == 6, "p50"].iloc[0] == 2.0
+
+
+def test_resolution_statistics_records_counts_and_ratios() -> None:
+    """Expose the per-class event mix behind an all-event curve."""
+    events = 6
+    results = pd.DataFrame(
+        {
+            "azimuth": [0.0] * events,
+            "zenith": [0.0] * events,
+            "dir_x_pred": [1.0] * events,
+            "dir_y_pred": [0.0] * events,
+            "dir_z_pred": [0.0] * events,
+            "energy": [10.0] * events,
+            "pid": [14] * events,
+            "interaction_type": [1] * events,
+        }
+    )
+    statistics = resolution_statistics(
+        {"candidate": results, "reference": results},
+        metric="angular_resolution",
+        reference="reference",
+    )
+
+    candidate = statistics[
+        (statistics["run"] == "candidate")
+        & (statistics["event_class"] == "tracks")
+        & (statistics["count"] == events)
+    ].iloc[0]
+    assert candidate["ratio_to_reference"] == 1.0
