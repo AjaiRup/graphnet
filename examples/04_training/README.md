@@ -46,37 +46,66 @@ This subfolder contains two main training scripts:
 
 ## IceMix joint reconstruction
 
-`09_train_icemix_joint_reconstruction.py` trains direction and vertex position
-with a shared IceMix backbone. Use the versioned Slurm launcher with a directory
-containing `nue.db`, `numu.db`, and `nutau.db`:
+IceMix uses one shared CLS token, vertex-only LayerNorm, global vertex targets
+scaled by 100 m, and continuous RDE features. Architecture and pulse sampling
+are fixed; the model config contains only loss, optimizer, scheduler, and
+dropout settings. Explicit CLI tuning arguments override that config.
+Training defaults to 80 epochs, rotation enabled, and no early stopping.
+
+From the checkout root:
 
 ```bash
 export DATA_ROOT=/path/to/databases
-export OUTPUT_ROOT=$PWD/outputs
-
-RUN_NAME=icemix-stage1 \
-sbatch -A <account> -q <qos> --gres=gpu:l40s:8 \
-    slurm/train_icemix.sh --seed 42 --max-epochs 100 \
-    --rotation-augmentation --length-cache-dir "$OUTPUT_ROOT/benchmarks" \
-    --split-cache-dir "$OUTPUT_ROOT/splits"
+mkdir -p slurm/logs
+RUN_NAME=icemix-seed42 sbatch slurm/train_icemix.sh \
+    --split-cache-dir outputs/vertex-ablation/rde-vertex-ablation-v2/cache/splits \
+    --length-cache-dir outputs/vertex-ablation/rde-vertex-ablation-v2/cache/lengths
 ```
 
-Select the Stage-1 checkpoint by the median direction error for events with
-energy at least 10 GeV, then calibrate vertex uncertainty without updating the
-backbone:
+Keep the existing seed-42 80/10/10 split cache. `--resume-from` restores an
+interrupted single-stage run. Use `--help` for training controls; model config
+values apply unless explicitly overridden. `--smoke-test` uses the small
+fixture with the full model and belongs on a compute node.
+
+The direction-best checkpoint minimizes median angular error at true energy
+>=10 GeV. Post-training predictions use the last epoch and record that choice;
+evaluate a selected checkpoint explicitly for comparisons:
 
 ```bash
-RUN_NAME=icemix-stage2 \
-sbatch -A <account> -q <qos> --gres=gpu:l40s:8 \
-    slurm/train_icemix.sh --seed 42 --max-epochs 3 --lr 1e-3 \
-    --stage2-from "$OUTPUT_ROOT/icemix-stage1/checkpoints/best-direction-65.ckpt" \
-    --length-cache-dir "$OUTPUT_ROOT/benchmarks" \
-    --split-cache-dir "$OUTPUT_ROOT/splits"
+sbatch slurm/predict_eval.sh \
+    --checkpoint outputs/my-run/checkpoints/best-direction-76.ckpt \
+    --model-config outputs/my-run/model_config.yml --split test \
+    --split-cache-dir outputs/vertex-ablation/rde-vertex-ablation-v2/cache/splits \
+    --output outputs/my-run/predictions/selected.csv
+python examples/04_training/11_plot_icemix_results.py \
+    --results outputs/my-run/predictions/selected.csv \
+    --metrics-csv outputs/my-run/logs/training/version_0/metrics.csv
 ```
 
-`configs/models/icemix_joint_reconstruction.yml` and
-`configs/models/icemix_joint_reconstruction_stage2.yml` record the approved
-architectures. Checkpoints, predictions, W&B logs, and caches remain external
-artifacts. The approved runs are `final-seed42-rot-100` (W&B `2hg0nbcy`) and
-`final-seed42-rot-100-stage2` (W&B `qrnot5gb`); both were created from commit
-`aba079ec`.
+Prediction exports include truth, event IDs, source database, and a metadata
+sidecar recording checkpoint/config, split, and seed. Evaluation uses FP32.
+`python diagnostics/predict_eval.py --analyze-only results.csv` summarizes an
+existing export without importing the model.
+
+Legacy shared-query configs require one-time conversion on a compute node. Other
+architectures are rejected; original files are never overwritten:
+
+```bash
+python diagnostics/migrate_icemix.py --model-config /path/to/legacy-run/model_config.yml \
+    --checkpoint /path/to/legacy-run/checkpoints/best-direction-76.ckpt \
+    --output-dir outputs/migrated-icemix
+```
+
+The converter writes `model_config.yml`, `state_dict.pth`, and provenance.
+It migrates inference weights, not optimizer/trainer state.
+
+```bash
+sbatch slurm/verify_cleanup.sh
+```
+
+This bounded verification job needs no production databases. It compares the
+saved pre-cleanup source against the migrated model, runs regression tests, and runs
+the five-event fixture smoke test. Results appear in
+`outputs/cleanup_validation/run-<job>-*/`: `parity.json`, `tests.log`,
+`smoke.log`, and `prediction.log`. `REFERENCE_SOURCE`, `REFERENCE_CHECKPOINT`, and `CONDA_ENV` can
+override the job defaults. Historical runs and source snapshots remain archived.

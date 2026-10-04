@@ -25,21 +25,9 @@ _RUN_NAME_PATTERN = re.compile(
     r"(?:_job-(?P<job_id>\d+))?$"
 )
 
-_CURSOR_PREDICTION_COLUMNS = {
-    "pos_x_pred": "position_x_pred",
-    "pos_y_pred": "position_y_pred",
-    "pos_z_pred": "position_z_pred",
-    "dir_kappa_pred": "direction_kappa",
-}
 
-
-# Physics quantities
 def angular_difference(results: pd.DataFrame) -> pd.Series:
-    """Return the opening angle in degrees between truth and prediction.
-
-    Uses the haversine form, which stays well conditioned for the small
-    separations that dominate a well-trained model's distribution.
-    """
+    """Return the opening angle in degrees between truth and prediction."""
     true_azimuth = results["azimuth"].to_numpy()
     true_zenith = results["zenith"].to_numpy()
     pred_x = results["dir_x_pred"].to_numpy()
@@ -76,14 +64,8 @@ METRICS: Dict[str, Tuple[Callable[[pd.DataFrame], pd.Series], str]] = {
 }
 
 
-# Selection
 def filter_by_class(results: pd.DataFrame, event_class: str) -> pd.DataFrame:
-    """Return the subset of `results` belonging to `event_class`.
-
-    `tracks` are charged-current muon-neutrino interactions, which leave an
-    extended track; everything else is treated as a cascade. The two have very
-    different resolution, so a combined curve hides most of what matters.
-    """
+    """Return the subset of `results` belonging to `event_class`."""
     if event_class == "all":
         return results
     is_track = (np.abs(results["pid"]) == MUON_NEUTRINO_PID) & (
@@ -97,6 +79,13 @@ def filter_by_class(results: pd.DataFrame, event_class: str) -> pd.DataFrame:
         f"Unknown event class '{event_class}'. "
         f"Expected one of {EVENT_CLASSES}."
     )
+
+
+def filter_by_flavours(
+    results: pd.DataFrame, flavours: Sequence[int]
+) -> pd.DataFrame:
+    """Return events with the requested absolute neutrino PIDs."""
+    return results[np.abs(results["pid"]).isin(list(flavours))]
 
 
 def binned_statistics(
@@ -129,19 +118,15 @@ def binned_statistics(
                 }
             )
         else:
-            row.update({f"p{int(percentile)}": np.nan for percentile in percentiles})
+            row.update(
+                {f"p{int(percentile)}": np.nan for percentile in percentiles}
+            )
         rows.append(row)
     return pd.DataFrame(rows)
 
 
-# Run discovery
 def find_results(base_dir: str) -> Dict[str, str]:
-    """Return the newest `results.csv` per project under `base_dir`.
-
-    Run directories are named `<project>_<date>_<time>[_job-<id>]`;
-    where a project has several runs, the one with the highest job id
-    wins.
-    """
+    """Return the newest `results.csv` per project under `base_dir`."""
     logger = Logger()
     newest: Dict[str, Tuple[int, str]] = {}
 
@@ -161,22 +146,14 @@ def find_results(base_dir: str) -> Dict[str, str]:
 
 
 def load_results(path: str, required: Sequence[str] = ()) -> pd.DataFrame:
-    """Load current or cursor-format results, checking required columns."""
+    """Load predictions, checking required columns."""
     results = pd.read_csv(path)
-    rename = {
-        source: target
-        for source, target in _CURSOR_PREDICTION_COLUMNS.items()
-        if source in results and target not in results
-    }
-    if rename:
-        results = results.rename(columns=rename)
     missing = [column for column in required if column not in results.columns]
     if missing:
         raise KeyError(f"{path} is missing column(s) {missing}")
     return results
 
 
-# Plots
 def resolution_statistics(
     named_results: Dict[str, pd.DataFrame],
     metric: str,
@@ -185,7 +162,7 @@ def resolution_statistics(
     n_bins: int = DEFAULT_ENERGY_BINS,
     log_energy_range: Tuple[float, float] = DEFAULT_LOG_ENERGY_RANGE,
 ) -> pd.DataFrame:
-    """Return cursor-style per-bin resolution statistics for each result."""
+    """Return per-bin resolution statistics for each result."""
     metric_fn, _ = METRICS[metric]
     tables = []
     for label, results in named_results.items():
@@ -229,9 +206,9 @@ def resolution_statistics(
         on=["metric", "event_class", "log_energy"],
         how="left",
     )
-    combined["ratio_to_reference"] = combined["p50"] / combined[
-        "reference_p50"
-    ]
+    combined["ratio_to_reference"] = (
+        combined["p50"] / combined["reference_p50"]
+    )
     return combined
 
 
@@ -244,11 +221,7 @@ def plot_resolution_vs_energy(
     n_bins: int = DEFAULT_ENERGY_BINS,
     log_energy_range: Tuple[float, float] = DEFAULT_LOG_ENERGY_RANGE,
 ) -> List[str]:
-    """Plot `metric` against energy, one figure per event class.
-
-    When `reference` names one of `named_results`, a lower panel shows each
-    curve as a ratio to it.
-    """
+    """Plot `metric` against energy, one figure per event class."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -371,52 +344,6 @@ def plot_training_curve(metrics_csv: str, output_dir: str) -> Optional[str]:
 
     os.makedirs(output_dir, exist_ok=True)
     path = os.path.join(output_dir, "loss.png")
-    figure.tight_layout()
-    figure.savefig(path, dpi=150)
-    plt.close(figure)
-    return path
-
-
-def plot_token_drop_sweep(
-    sweep_dir: str, output_dir: str, metric: str = "angular_resolution"
-) -> Optional[str]:
-    """Plot median resolution against the inference-time drop fraction.
-
-    Consumes the CSVs written by `10_evaluate_token_drop_robustness.py`.
-    """
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    paths = sorted(glob.glob(os.path.join(sweep_dir, "token_drop_*.csv")))
-    if not paths:
-        Logger().warning(f"No sweep CSVs in {sweep_dir}")
-        return None
-
-    metric_fn, ylabel = METRICS[metric]
-    figure, axis = plt.subplots(figsize=(7, 5))
-
-    for event_class in EVENT_CLASSES:
-        fractions, medians = [], []
-        for path in paths:
-            results = pd.read_csv(path)
-            subset = filter_by_class(results, event_class)
-            if subset.empty:
-                continue
-            fractions.append(float(results["token_drop"].iloc[0]))
-            medians.append(float(np.median(metric_fn(subset))))
-        if fractions:
-            axis.plot(fractions, medians, marker="o", label=event_class)
-
-    axis.set_xlabel("Fraction of pulses dropped")
-    axis.set_ylabel(f"Median {ylabel.lower()}")
-    axis.set_title("Robustness to missing pulses")
-    axis.legend()
-    axis.grid(alpha=0.3)
-
-    os.makedirs(output_dir, exist_ok=True)
-    path = os.path.join(output_dir, f"token_drop_{metric}.png")
     figure.tight_layout()
     figure.savefig(path, dpi=150)
     plt.close(figure)

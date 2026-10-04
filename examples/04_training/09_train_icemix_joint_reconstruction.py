@@ -1,142 +1,69 @@
-"""Train IceMix for joint neutrino direction and vertex reconstruction.
-
-Two prediction heads share one `DeepIce` backbone: a vertex head trained with a
-Euclidean distance loss and a direction head trained with a 3D von Mises-Fisher
-loss, combined as `alpha * vertex + direction`. An optional second stage
-(`--stage2-from`) fits a per-event vertex uncertainty on the frozen network.
-"""
+"""Train IceMix for joint direction and vertex reconstruction."""
 
 import os
+import json
+import argparse
+from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 from pytorch_lightning.callbacks import (
-    Callback,
     EarlyStopping,
     ModelCheckpoint,
 )
 from pytorch_lightning.loggers import CSVLogger, WandbLogger
 from pytorch_lightning.plugins.environments import SLURMEnvironment
+from pytorch_lightning.strategies import DDPStrategy
 from pytorch_lightning.utilities import rank_zero_only
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from graphnet.constants import DATASETS_CONFIG_DIR, EXAMPLE_OUTPUT_DIR
+from graphnet.constants import (
+    DATASETS_CONFIG_DIR,
+    EXAMPLE_OUTPUT_DIR,
+    GRAPHNET_ROOT_DIR,
+)
 from graphnet.data.dataloader import DataLoader, do_shuffle
 from graphnet.data.dataset import EnsembleDataset, LengthGroupedSampler
 from graphnet.data.dataset.sqlite.sqlite_dataset import SQLiteDataset
 from graphnet.models import StandardModel
 from graphnet.models.data_representation import GraphDefinition
-from graphnet.models.data_representation.graphs.nodes import IceMixNodes
-from graphnet.models.detector.icecube import IceCube86
-from graphnet.models.gnn import DeepIce
-from graphnet.models.task.task import IdentityTask
-from graphnet.models.task.reconstruction import (
-    DirectionReconstructionWithKappaDecoupled,
-    PositionReconstructionWithSigma,
-)
 from graphnet.training.callbacks import (
     PhysicsMetricsCallback,
     ProgressBar,
     RandomRotationCallback,
 )
 from graphnet.training.labels import Direction
-from graphnet.training.loss_functions import (
-    EnsembleLoss,
-    EuclideanDistanceLoss,
-    IsotropicGaussianNLLLoss,
-    PerEventRecordingLoss,
-    VonMisesFisher3DLoss,
-)
 from graphnet.utilities.argparse import ArgumentParser
-from graphnet.utilities.config import DatasetConfig, ModelConfig
+from graphnet.utilities.config import DatasetConfig
 from graphnet.utilities.logging import Logger
 from graphnet.data.utilities.lengths import event_lengths
 from graphnet.data.utilities.paths import resolve_dataset_paths
 from graphnet.data.utilities.splits import seeded_event_splits
 
-POSITION_LABELS = ["position_x", "position_y", "position_z"]
-FEATURES = ["dom_x", "dom_y", "dom_z", "dom_time", "charge", "hlc"]
+from graphnet.models.transformer.icemix import (
+    POSITION_LABELS,
+    build_data_representation,
+    load_icemix_model,
+    validate_dataset_config,
+)
 
-CURSOR_PREDICTION_ALIASES = {
-    "position_x_pred": "pos_x_pred",
-    "position_y_pred": "pos_y_pred",
-    "position_z_pred": "pos_z_pred",
-    "direction_kappa": "dir_kappa_pred",
-}
-
-# Metres per unit of the standardized position targets.
 POSITION_SCALE_M = 100.0
-
-# Fixed hyperparameters of the validated configuration.
-MLP_RATIO = 4
-DROPOUT = 0.1
-ATTN_DROP = 0.05
-PROJ_DROP = 0.1
-DROP_PATH_RATE = 0.2
-ALPHA = 2.6
-KAPPA_SWITCH = 700.0
+# Rotate nodes and global targets about the same physical DeepCore axis.
+DEEP_CORE_XY_ORIGIN_M = (46.3, -34.9)
+ICECUBE86_XY_SCALE_M = 500.0
 SEL_ENERGY_MIN_GEV = 10.0
-SCHEDULER_PATIENCE = 3
-SCHEDULER_FACTOR = 0.5
-
-
-def model_size(smoke: bool) -> Dict[str, int]:
-    """Return the transformer dimensions, shrunk for the CPU smoke test."""
-    if smoke:
-        return dict(
-            hidden_dim=32, seq_length=16, depth=2, depth_rel=1, n_rel=1,
-            head_size=8,
-        )
-    return dict(
-        hidden_dim=384, seq_length=128, depth=12, depth_rel=4, n_rel=4,
-        head_size=32,
-    )
-
-
-def scale_position(x):  # type: ignore[no-untyped-def]
-    # Keep this self-contained: ModelConfig serializes the function body.
-    x[:, 0] = (x[:, 0] - 46.3) / 100.0
-    x[:, 1] = (x[:, 1] + 34.9) / 100.0
-    x[:, 2] = (x[:, 2] + 350.0) / 100.0
-    return x
-
-
-def unscale_position(x):  # type: ignore[no-untyped-def]
-    x[:, 0] = x[:, 0] * 100.0 + 46.3
-    x[:, 1] = x[:, 1] * 100.0 - 34.9
-    x[:, 2] = x[:, 2] * 100.0 - 350.0
-    return x
-
-
-def unscale_position_sigma(x):  # type: ignore[no-untyped-def]
-    x[:, 0] = x[:, 0] * 100.0 + 46.3
-    x[:, 1] = x[:, 1] * 100.0 - 34.9
-    x[:, 2] = x[:, 2] * 100.0 - 350.0
-    x[:, 3] = x[:, 3].exp() * 100.0
-    return x
-
-
-def add_cursor_prediction_aliases(results):  # type: ignore[no-untyped-def]
-    """Add the prediction names consumed by the cursor plotting scripts."""
-    for source, target in CURSOR_PREDICTION_ALIASES.items():
-        results[target] = results[source]
-    return results
-
-
-class FrozenTrunkEvalCallback(Callback):
-    """Keep the frozen Stage-1 network in evaluation mode."""
-
-    def _pin(self, pl_module: Any) -> None:
-        pl_module.backbone.eval()
-
-    def on_train_epoch_start(self, trainer: Any, pl_module: Any) -> None:
-        self._pin(pl_module)
-
-    def on_train_batch_start(
-        self, trainer: Any, pl_module: Any, batch: Any, batch_idx: int
-    ) -> None:
-        self._pin(pl_module)
+MODEL_TUNING_ARGUMENTS = (
+    "vertex_weight",
+    "direction_weight",
+    "lr",
+    "weight_decay",
+    "adam_eps",
+    "scheduler_factor",
+    "scheduler_patience",
+    "dropout",
+    "attn_drop",
+    "proj_drop",
+    "drop_path_rate",
+)
 
 
 def single_threaded_worker(_worker_id: int) -> None:
@@ -150,35 +77,8 @@ def batch_limit(value: str) -> Any:
     return float(value) if "." in value else int(value)
 
 
-def build_data_representation(
-    features: List[str],
-    max_pulses: int,
-    hlc_name: Optional[str],
-    add_ice_properties: bool,
-    add_static_features: bool = False,
-) -> GraphDefinition:
-    """Return the pulse-sequence representation IceMix consumes."""
-    return GraphDefinition(
-        detector=IceCube86(),
-        node_definition=IceMixNodes(
-            input_feature_names=features,
-            max_pulses=max_pulses,
-            z_name="dom_z",
-            hlc_name=hlc_name,
-            add_ice_properties=add_ice_properties,
-        ),
-        input_feature_names=features,
-        add_static_features=add_static_features,
-    )
-
-
 def ddp_ranks(n_devices: int) -> Tuple[int, int]:
-    """Return `(rank, world_size)` before DDP has started.
-
-    `LengthGroupedSampler` shards the epoch at construction time, so the
-    rank must come from SLURM variables, not the not-yet-created process
-    group.
-    """
+    """Return `(rank, world_size)` before DDP has started."""
     tasks = int(os.environ.get("SLURM_NTASKS", "1"))
     if n_devices <= 1:
         return 0, 1
@@ -208,15 +108,13 @@ def build_dataloaders(
     rank: int = 0,
     world_size: int = 1,
 ) -> Dict[str, DataLoader]:
-    """Return the train/validation/test dataloaders.
-
-    A dataset config with a `selection` is delegated to
-    `DataLoader.from_dataset_config`; otherwise the split comes from
-    `seeded_event_splits` and batches are length-matched by
-    `LengthGroupedSampler`.
-    """
+    """Return the train/validation/test dataloaders."""
     logger = Logger()
+    validate_dataset_config(dataset_config)
     if dataset_config.selection is not None:
+        representation = data_representation.config.dict()
+        representation["arguments"]["dtype"] = "torch.float32"
+        dataset_config.data_representation = representation
         if group_factor > 0:
             logger.warning(
                 "Length grouping needs the per-database index lists that "
@@ -321,105 +219,9 @@ def build_dataloaders(
 
 
 def build_model(args: Any) -> StandardModel:
-    """Return the `StandardModel` to train."""
-    smoke = getattr(args, "smoke_test", False)
-    data_representation = build_data_representation(
-        features=FEATURES,
-        max_pulses=32 if smoke else 256,
-        hlc_name="hlc",
-        add_ice_properties=False,
-    )
-
-    if args.model_config:
-        Logger().info(f"Loading model from {args.model_config}")
-        model = StandardModel.from_config(
-            ModelConfig.load(args.model_config), trust=True
-        )
-        assert isinstance(model, StandardModel)
-        return model
-
-    backbone = DeepIce(
-        mlp_ratio=MLP_RATIO,
-        scaled_emb=True,
-        include_dynedge=False,
-        n_features=len(FEATURES),
-        init_values=1.0,
-        init_values_rel=1.0,
-        dropout=DROPOUT,
-        attn_drop=ATTN_DROP,
-        proj_drop=PROJ_DROP,
-        drop_path_rate=DROP_PATH_RATE,
-        norm_cls=True,
-        **model_size(smoke),
-    )
-
-    if args.stage2_from:
-        position_task = PositionReconstructionWithSigma(
-            hidden_size=backbone.nb_outputs,
-            target_labels=POSITION_LABELS,
-            loss_function=PerEventRecordingLoss(
-                IsotropicGaussianNLLLoss(detach_position=True),
-                metric_name="position",
-            ),
-            transform_target=scale_position,
-            transform_inference=unscale_position_sigma,
-        )
-    else:
-        position_task = IdentityTask(
-            nb_outputs=3,
-            target_labels=POSITION_LABELS,
-            prediction_labels=[
-                "position_x_pred",
-                "position_y_pred",
-                "position_z_pred",
-            ],
-            hidden_size=backbone.nb_outputs,
-            loss_function=PerEventRecordingLoss(
-                EnsembleLoss(
-                    loss_functions=[EuclideanDistanceLoss()],
-                    loss_factors=[ALPHA],
-                ),
-                metric_name="position",
-            ),
-            transform_target=scale_position,
-            transform_inference=unscale_position,
-        )
-
-    tasks = [
-        position_task,
-        DirectionReconstructionWithKappaDecoupled(
-            hidden_size=backbone.nb_outputs,
-            target_labels=["direction"],
-            loss_function=PerEventRecordingLoss(
-                VonMisesFisher3DLoss(
-                    kappa_switch=KAPPA_SWITCH,
-                    approximation="tight",
-                ),
-                metric_name="direction",
-            ),
-        ),
-    ]
-
-    optimizer_kwargs: Dict[str, Any] = {"lr": args.lr, "eps": 1e-05}
-    if args.stage2_from:
-        # AdamW's decoupled weight decay updates every tensor with a
-        # gradient, including the grafted position rows; zero decay keeps
-        # Stage-1 outputs bit-exact.
-        optimizer_kwargs["weight_decay"] = 0.0
-
-    return StandardModel(
-        data_representation=data_representation,
-        backbone=backbone,
-        tasks=tasks,
-        optimizer_class=AdamW,
-        optimizer_kwargs=optimizer_kwargs,
-        scheduler_class=ReduceLROnPlateau,
-        scheduler_kwargs={
-            "mode": "min",
-            "patience": SCHEDULER_PATIENCE,
-            "factor": SCHEDULER_FACTOR,
-        },
-        scheduler_config={"monitor": "val_loss", "frequency": 1},
+    return load_icemix_model(
+        args.model_config,
+        **{name: getattr(args, name, None) for name in MODEL_TUNING_ARGUMENTS},
     )
 
 
@@ -439,8 +241,7 @@ def build_callbacks(args: Any, output_dir: str, rank: int = 0) -> List[Any]:
             save_top_k=3,
             save_last=True,
         ),
-        # `val_loss` is direction-dominated; track the vertex-best epoch
-        # separately.
+        # Keep task-specific checkpoints alongside the joint-loss checkpoint.
         ModelCheckpoint(
             dirpath=os.path.join(output_dir, "checkpoints"),
             filename="best-position-{epoch:02d}",
@@ -469,14 +270,17 @@ def build_callbacks(args: Any, output_dir: str, rank: int = 0) -> List[Any]:
                 mode="min",
             )
         )
-    if args.stage2_from:
-        callbacks.append(FrozenTrunkEvalCallback())
     if args.rotation_augmentation:
-        # Offset by rank so the ranks don't all draw the same angle stream
-        # while still being reproducible from `--seed`.
+        position_xy_origin = DEEP_CORE_XY_ORIGIN_M
+        node_xy_origin = tuple(
+            coordinate / ICECUBE86_XY_SCALE_M
+            for coordinate in position_xy_origin
+        )
         callbacks.append(
             RandomRotationCallback(
-                seed=None if args.seed is None else args.seed + rank
+                seed=None if args.seed is None else args.seed + rank,
+                node_xy_origin=node_xy_origin,
+                position_xy_origin=position_xy_origin,
             )
         )
     return callbacks
@@ -497,6 +301,7 @@ def main(args: Any) -> None:
         return
 
     dataset_config = DatasetConfig.load(args.dataset_config)
+    validate_dataset_config(dataset_config)
 
     output_dir = args.output_dir or os.path.join(
         EXAMPLE_OUTPUT_DIR, "icemix_joint_reconstruction", args.run_name
@@ -504,13 +309,8 @@ def main(args: Any) -> None:
     if rank_zero_only.rank == 0:
         os.makedirs(output_dir, exist_ok=True)
 
-    max_pulses = 32 if args.smoke_test else 256
-    data_representation = build_data_representation(
-        features=FEATURES,
-        max_pulses=max_pulses,
-        hlc_name="hlc",
-        add_ice_properties=False,
-    )
+    max_pulses = 256
+    data_representation = build_data_representation()
 
     dataloader_kwargs: Dict[str, Any] = {
         "batch_size": args.batch_size,
@@ -553,48 +353,9 @@ def main(args: Any) -> None:
 
     model = build_model(args)
 
-    if args.fine_tune_from and args.stage2_from:
-        raise ValueError(
-            "--fine-tune-from and --stage2-from are mutually exclusive: "
-            "fine-tuning trains everything, Stage 2 trains only the sigma "
-            "row of the position head."
-        )
-
-    if args.fine_tune_from:
-        logger.info(f"Loading weights for fine-tuning: {args.fine_tune_from}")
-        checkpoint = torch.load(
-            args.fine_tune_from, map_location="cpu", weights_only=False
-        )
-        model.load_state_dict(checkpoint.get("state_dict", checkpoint))
-
-    if args.stage2_from:
-        logger.info(f"Stage 2: grafting Stage-1 weights: {args.stage2_from}")
-        checkpoint = torch.load(
-            args.stage2_from, map_location="cpu", weights_only=False
-        )
-        state = checkpoint.get("state_dict", checkpoint)
-        weight = state["_tasks.0._affine.weight"]
-        bias = state["_tasks.0._affine.bias"]
-        if weight.shape[0] == 3:
-            # Graft the 3-row Stage-1 head; sigma starts at log(sigma) = 0.
-            expanded_weight = torch.zeros(4, weight.shape[1])
-            expanded_weight[:3] = weight
-            expanded_bias = torch.zeros(4)
-            expanded_bias[:3] = bias
-            state["_tasks.0._affine.weight"] = expanded_weight
-            state["_tasks.0._affine.bias"] = expanded_bias
-        model.load_state_dict(state)
-
-        # Freeze everything except the position head; the grafted rows
-        # stay bit-identical (detached loss, zero weight decay).
-        trainable = 0
-        for name, parameter in model.named_parameters():
-            is_position_head = name.startswith("_tasks.0._affine")
-            parameter.requires_grad_(is_position_head)
-            trainable += parameter.numel() if is_position_head else 0
-        logger.info(
-            f"Stage 2: {trainable} trainable parameters (position head)."
-        )
+    if rank_zero_only.rank == 0:
+        # Keep the exact architecture inspectable even if this run is canceled.
+        model.save_config(os.path.join(output_dir, "model_config.yml"))
 
     loggers: List[Any] = [
         CSVLogger(save_dir=os.path.join(output_dir, "logs"), name="training")
@@ -640,7 +401,9 @@ def main(args: Any) -> None:
         ckpt_path=args.resume_from,
         logger=loggers,
         distribution_strategy=(
-            "ddp" if args.gpus and len(args.gpus) > 1 else "auto"
+            DDPStrategy(timeout=timedelta(minutes=10))
+            if args.gpus and len(args.gpus) > 1
+            else "auto"
         ),
         precision="32-true" if args.smoke_test else "16-mixed",
         accumulate_grad_batches=args.accumulate_grad_batches,
@@ -651,11 +414,7 @@ def main(args: Any) -> None:
         **extra_trainer_kwargs,
     )
 
-    # Under DDP every rank runs the whole script, so an unguarded write here
-    # is eight processes opening the same path at once. The content is
-    # identical, which makes a torn file the only observable symptom -- and a
-    # rare one, which is worse. Rank zero writes; the rest already hold the
-    # same weights and have nothing to contribute.
+    # Only rank zero writes shared artifacts.
     if rank_zero_only.rank == 0:
         model.save_state_dict(os.path.join(output_dir, "state_dict.pth"))
         model.save_config(os.path.join(output_dir, "model_config.yml"))
@@ -678,8 +437,9 @@ def main(args: Any) -> None:
         "energy",
         "pid",
         "interaction_type",
-        "oneweight",
+        *(["oneweight"] if "oneweight" in dataset_config.truth else []),
         dataset_config.index_column,
+        "n_pulses",
     ]
     results = model.predict_as_dataframe(
         prediction_loader,
@@ -688,6 +448,7 @@ def main(args: Any) -> None:
         # Sharding the test loader would misalign predictions with the
         # attribute pass inside `predict_as_dataframe`.
         use_distributed_sampler=False,
+        precision="32-true",
     )
 
     missing = [
@@ -703,26 +464,61 @@ def main(args: Any) -> None:
             "that the `test` split still uses a plain `SequentialSampler`."
         )
 
+    datasets = getattr(
+        prediction_loader.dataset, "datasets", [prediction_loader.dataset]
+    )
+    sources = [
+        os.path.realpath(dataset.path)
+        for dataset in datasets
+        for _ in range(len(dataset))
+    ]
+    if len(sources) != len(results):
+        raise RuntimeError(
+            "Prediction row count differs from the selected events"
+        )
+    results["source_db"] = sources
+
     if rank_zero_only.rank == 0:
         predictions_dir = os.path.join(output_dir, "predictions")
         os.makedirs(predictions_dir, exist_ok=True)
-        results = add_cursor_prediction_aliases(results)
         results.to_csv(
             os.path.join(predictions_dir, "results.csv"), index=False
         )
+        with open(
+            os.path.join(predictions_dir, "metadata.json"), "w"
+        ) as handle:
+            json.dump(
+                {
+                    "checkpoint": os.path.abspath(
+                        os.path.join(output_dir, "state_dict.pth")
+                    ),
+                    "selection": "last epoch",
+                    "precision": "32-true",
+                    "seed": args.seed,
+                    "split_seed": dataset_config.seed,
+                    "dataset_config": os.path.abspath(args.dataset_config),
+                    "split": "test" if "test" in dataloaders else "validation",
+                    "model_config": os.path.abspath(
+                        os.path.join(output_dir, "model_config.yml")
+                    ),
+                },
+                handle,
+                indent=2,
+            )
         logger.info(f"Wrote predictions to {predictions_dir}/results.csv")
 
 
 def _apply_smoke_test_overrides(args: Any) -> None:
-    """Shrink the run so it completes on CPU against the test fixture."""
+    """Limit data and steps while retaining the full model."""
     args.dataset_config = os.path.join(
         DATASETS_CONFIG_DIR, "icecube86_joint_reconstruction_fixture.yml"
     )
     args.max_epochs = 2
+    args.limit_train_batches = 1
+    args.limit_val_batches = 1
     args.early_stopping_patience = 0
     args.batch_size = 2
     args.num_workers = 0
-    args.gpus = None
     args.wandb = False
     args.output_dir = args.output_dir or os.path.join(
         EXAMPLE_OUTPUT_DIR, "icemix_joint_reconstruction", "smoke_test"
@@ -730,15 +526,14 @@ def _apply_smoke_test_overrides(args: Any) -> None:
 
 
 def build_parser() -> ArgumentParser:
-    """Return the argument parser, callable from external harnesses via
-    `build_parser().parse_args([])`."""
+    """Return the training argument parser."""
     parser = ArgumentParser(
         description="Train IceMix for joint direction + vertex reconstruction."
     )
     parser.with_standard_arguments(
         "gpus",
-        ("max-epochs", 100),
-        ("early-stopping-patience", 12),
+        ("max-epochs", 80),
+        ("early-stopping-patience", 0),
         ("batch-size", 256),
         ("num-workers", 3),
     )
@@ -768,7 +563,12 @@ def build_parser() -> ArgumentParser:
     )
 
     model_group = parser.add_argument_group("model")
-    model_group.add_argument("--model-config", default=None)
+    model_group.add_argument(
+        "--model-config",
+        default=os.path.join(
+            GRAPHNET_ROOT_DIR, "configs/models/icemix_joint_reconstruction.yml"
+        ),
+    )
     model_group.add_argument(
         "--save-model-config",
         default=None,
@@ -776,7 +576,13 @@ def build_parser() -> ArgumentParser:
     )
 
     optimisation = parser.add_argument_group("optimisation")
-    optimisation.add_argument("--lr", type=float, default=6.25e-5)
+    for name in MODEL_TUNING_ARGUMENTS:
+        optimisation.add_argument(
+            "--" + name.replace("_", "-"),
+            type=int if name == "scheduler_patience" else float,
+            default=None,
+            help="Override the saved config (otherwise use model defaults).",
+        )
     optimisation.add_argument(
         "--gradient-clip-val",
         type=float,
@@ -796,7 +602,8 @@ def build_parser() -> ArgumentParser:
     optimisation.add_argument("--seed", type=int, default=42)
     optimisation.add_argument(
         "--rotation-augmentation",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Apply z-axis rotation to training batches.",
     )
 
@@ -804,12 +611,6 @@ def build_parser() -> ArgumentParser:
     run.add_argument("--run-name", default="icemix")
     run.add_argument("--output-dir", default=None)
     run.add_argument("--resume-from", default=None)
-    run.add_argument("--fine-tune-from", default=None)
-    run.add_argument(
-        "--stage2-from",
-        default=None,
-        help="Calibrate vertex sigma on this frozen Stage-1 checkpoint.",
-    )
     run.add_argument("--wandb", action="store_true")
     run.add_argument("--wandb-project", default="IceMix")
     run.add_argument("--wandb-entity", default=None)
@@ -822,7 +623,7 @@ def build_parser() -> ArgumentParser:
     run.add_argument(
         "--smoke-test",
         action="store_true",
-        help="Shrink everything to run on CPU against the test fixture.",
+        help="Use the small dataset fixture and two short epochs with the full model.",
     )
 
     return parser

@@ -81,8 +81,7 @@ class SinusoidalPosEmb(LightningModule):
             raise ValueError(f"dim has to be even. Got: {dim}")
         self.scale = nn.Parameter(torch.ones(1) * dim**-0.5) if scaled else 1.0
         self.dim = dim
-        # A buffer so `.to(device)` moves it once; `persistent=False` keeps
-        # older checkpoints loadable.
+        # Nonpersistent for compatibility with existing checkpoints.
         self.register_buffer(
             "n_freq", torch.tensor([float(n_freq)]), persistent=False
         )
@@ -115,9 +114,6 @@ class FourierEncoder(LightningModule):
         output_dim: int = 384,
         scaled: bool = False,
         n_features: int = 6,
-        pos_time_multiplier: float = 4096.0,
-        charge_multiplier: float = 1024.0,
-        n_freq: float = 10000.0,
     ):
         """Construct `FourierEncoder`.
 
@@ -131,22 +127,11 @@ class FourierEncoder(LightningModule):
             output_dim: Dimension of the output (I.e. number of columns).
             scaled: Whether or not to scale the embeddings.
             n_features: The number of features in the input data.
-            pos_time_multiplier: Scale applied to the (already standardized)
-                position and time features before sinusoidal encoding.
-            charge_multiplier: Scale applied to the (already standardized)
-                charge feature before sinusoidal encoding.
-            n_freq: Number of frequencies of the sinusoidal embeddings.
         """
         super().__init__()
 
-        self.sin_emb = SinusoidalPosEmb(
-            dim=seq_length, n_freq=n_freq, scaled=scaled
-        )
-        self.sin_emb2 = SinusoidalPosEmb(
-            dim=seq_length // 2, n_freq=n_freq, scaled=scaled
-        )
-        self.pos_time_multiplier = pos_time_multiplier
-        self.charge_multiplier = charge_multiplier
+        self.sin_emb = SinusoidalPosEmb(dim=seq_length, scaled=scaled)
+        self.sin_emb2 = SinusoidalPosEmb(dim=seq_length // 2, scaled=scaled)
 
         if n_features < 4:
             raise ValueError(
@@ -178,29 +163,16 @@ class FourierEncoder(LightningModule):
     ) -> Tensor:
         """Forward pass."""
         length = torch.log10(seq_length.to(dtype=x.dtype))
-        embeddings = [
-            self.sin_emb(self.pos_time_multiplier * x[:, :, :3]).flatten(-2)
-        ]  # Position
+        embeddings = [self.sin_emb(4096 * x[:, :, :3]).flatten(-2)]  # Position
 
         if self.n_features >= 5:
-            embeddings.append(
-                self.sin_emb(self.charge_multiplier * x[:, :, 4])
-            )  # Charge
+            embeddings.append(self.sin_emb(1024 * x[:, :, 4]))  # Charge
 
-        embeddings.append(
-            self.sin_emb(self.pos_time_multiplier * x[:, :, 3])
-        )  # Time
+        embeddings.append(self.sin_emb(4096 * x[:, :, 3]))  # Time
 
         if self.n_features >= 6:
-            # Threshold rather than cast: `aux_emb` needs an index in
-            # {0, 1}, and `.long()` maps standardized two-valued features
-            # (e.g. `rde` at {-1.0, 0.4}) to illegal indices.
-            embeddings.append(
-                self.aux_emb((x[:, :, 5] > 0).long())
-            )  # Auxiliary
+            embeddings.append(self.aux_emb(x[:, :, 5].long()))  # Auxiliary
 
-        # `x.shape[1]`, not `max(seq_length)`: identical value, but the
-        # builtin `max` over a CUDA tensor syncs once per comparison.
         embeddings.append(
             self.sin_emb2(length).unsqueeze(1).expand(-1, x.shape[1], -1)
         )  # Length
@@ -217,11 +189,6 @@ class SpacetimeEncoder(LightningModule):
     def __init__(
         self,
         seq_length: int = 32,
-        distance_scale: float = 3e4 / 500 * 3e-1,
-        distance_clip_min: float = -4.0,
-        distance_clip_max: float = 4.0,
-        distance_multiplier: float = 1024.0,
-        n_freq: float = 10000.0,
     ):
         """Construct `SpacetimeEncoder`.
 
@@ -231,23 +198,10 @@ class SpacetimeEncoder(LightningModule):
 
         Args:
             seq_length: Dimensionality of the sinusoidal positional embeddings.
-            distance_scale: Conversion factor applied to the time difference so
-                that it is commensurate with the spatial separation. The
-                default reproduces the 2nd place solution's `3e4 / 500 * 3e-1`.
-            distance_clip_min: Lower clip applied to the four-distance.
-            distance_clip_max: Upper clip applied to the four-distance.
-            distance_multiplier: Scale applied to the clipped four-distance
-                before sinusoidal encoding.
-            n_freq: Number of frequencies of the sinusoidal embeddings.
         """
         super().__init__()
-        self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
+        self.sin_emb = SinusoidalPosEmb(dim=seq_length)
         self.projection = nn.Linear(seq_length, seq_length)
-
-        self.distance_scale = distance_scale
-        self.distance_clip_min = distance_clip_min
-        self.distance_clip_max = distance_clip_max
-        self.distance_multiplier = distance_multiplier
 
     def forward(
         self,
@@ -259,78 +213,11 @@ class SpacetimeEncoder(LightningModule):
         time = x[:, :, 3]
         spacetime_interval = (pos[:, :, None] - pos[:, None, :]).pow(2).sum(
             -1
-        ) - ((time[:, :, None] - time[:, None, :]) * self.distance_scale).pow(
-            2
-        )
+        ) - ((time[:, :, None] - time[:, None, :]) * (3e4 / 500 * 3e-1)).pow(2)
         four_distance = torch.sign(spacetime_interval) * torch.sqrt(
             torch.abs(spacetime_interval)
         )
-        sin_emb = self.sin_emb(
-            self.distance_multiplier
-            * four_distance.clip(
-                self.distance_clip_min, self.distance_clip_max
-            )
-        )
-        rel_attn = self.projection(sin_emb)
-        return rel_attn
-
-
-class MahalanobisEncoder(LightningModule):
-    """Mahalanobis encoder module."""
-
-    def __init__(
-        self,
-        seq_length: int = 32,
-        distance_scale: float = 3e4 / 500 * 3e-1,
-        distance_clip_min: float = -4.0,
-        distance_clip_max: float = 4.0,
-        distance_multiplier: float = 1024.0,
-        n_freq: float = 10000.0,
-    ):
-        """Construct `MahalanobisEncoder`.
-
-        This module calculates the Mahalanobis distance between each pair of
-        pulses and generates sinusoidal positional embeddings to be added to
-        input sequences.
-
-        In contrast to the Minkowski metric used by `SpacetimeEncoder`, the
-        Mahalanobis distance is a proper metric and thus positive definite.
-        It is not Lorentz invariant, but remains a sensible metric as long as
-        all measurements are taken in the same frame.
-
-        Args:
-            seq_length: Dimensionality of the sinusoidal positional embeddings.
-            distance_scale: Conversion factor applied to the time difference so
-                that it is commensurate with the spatial separation.
-            distance_clip_min: Lower clip applied to the distance.
-            distance_clip_max: Upper clip applied to the distance.
-            distance_multiplier: Scale applied to the clipped distance before
-                sinusoidal encoding.
-            n_freq: Number of frequencies of the sinusoidal embeddings.
-        """
-        super().__init__()
-        self.sin_emb = SinusoidalPosEmb(dim=seq_length, n_freq=n_freq)
-        self.projection = nn.Linear(seq_length, seq_length)
-
-        self.distance_scale = distance_scale
-        self.distance_clip_min = distance_clip_min
-        self.distance_clip_max = distance_clip_max
-        self.distance_multiplier = distance_multiplier
-
-    def forward(self, x: Tensor) -> Tensor:
-        """Forward pass."""
-        pos = x[:, :, :3]
-        time = x[:, :, 3]
-        squared_distance = (pos[:, :, None] - pos[:, None, :]).pow(2).sum(
-            -1
-        ) + ((time[:, :, None] - time[:, None, :]) * self.distance_scale).pow(
-            2
-        )
-        distance = torch.sqrt(squared_distance)
-        sin_emb = self.sin_emb(
-            self.distance_multiplier
-            * distance.clip(self.distance_clip_min, self.distance_clip_max)
-        )
+        sin_emb = self.sin_emb(1024 * four_distance.clip(-4, 4))
         rel_attn = self.projection(sin_emb)
         return rel_attn
 

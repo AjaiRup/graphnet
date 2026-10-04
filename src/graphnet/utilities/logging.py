@@ -8,6 +8,7 @@ import os
 import re
 import sys
 import typing
+import warnings
 from typing import Any, List, Optional, Set, Tuple
 
 # Constants
@@ -147,6 +148,23 @@ class Logger:
     def _make_sure_root_logger_is_configured(
         cls, log_folder: Optional[str] = LOG_FOLDER
     ) -> None:
+        if log_folder is not None:
+            try:
+                log_folder = os.path.abspath(log_folder)
+            except FileNotFoundError:
+                # A long-running worker may lose its cwd while its open log
+                # file remains usable. Do not abort training just to resolve
+                # the default relative log directory again. Preserve existing
+                # handlers; a fresh logger falls back to the stream handler.
+                warnings.warn(
+                    "Working directory is unavailable; retaining existing "
+                    "logging handlers without opening a relative log file.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+                log_folder = None
+                if not cls._get_root_logger().handlers:
+                    cls._configure_root_logger(None)
         root = cls._get_root_logger()
         # Always configure if no handlers are found.
         if not root.hasHandlers():
@@ -164,7 +182,7 @@ class Logger:
             # requested log folder. Otherwise re-configure with a new
             # FileHandler.
             if not any(
-                [lf.startswith(os.path.abspath(log_folder)) for lf in logfiles]
+                [lf.startswith(log_folder) for lf in logfiles]
             ):
                 cls._configure_root_logger(log_folder)
 

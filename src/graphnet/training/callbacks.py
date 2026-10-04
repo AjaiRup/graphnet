@@ -263,20 +263,7 @@ class GraphnetEarlyStopping(EarlyStopping):
 
 
 class RandomRotationCallback(Callback):
-    """Randomly rotate each event about the detector's z-axis.
-
-    Augments training batches in place: sensor `(x, y)` coordinates and the
-    corresponding truth quantities are rotated by a per-event angle drawn
-    uniformly from `[0, 2 * pi)`. Because IceCube's geometry is (to good
-    approximation) azimuthally symmetric, this maps a physical event onto
-    another equally physical event.
-
-    The rotation is applied to the *standardized* node features. This is exact
-    as long as the detector applies the same offset-free scaling to `x` and
-    `y`, which holds for `IceCube86` (`dom_x`, `dom_y` and `dom_z` all map
-    through `x / 500`). Verify this before using the callback with another
-    `Detector`.
-    """
+    """Randomly rotate each event about a configurable z-axis pivot."""
 
     def __init__(
         self,
@@ -286,27 +273,18 @@ class RandomRotationCallback(Callback):
         direction_key: str = "direction",
         position_keys: Tuple[str, str] = ("position_x", "position_y"),
         azimuth_key: str = "azimuth",
+        node_xy_origin: Tuple[float, float] = (0.0, 0.0),
+        position_xy_origin: Tuple[float, float] = (0.0, 0.0),
     ) -> None:
-        """Construct `RandomRotationCallback`.
-
-        Args:
-            seed: Seed of the angle generator. If None, the generator is seeded
-                non-deterministically.
-            x_index: Column of `Data.x` holding the sensor x-coordinate.
-            y_index: Column of `Data.x` holding the sensor y-coordinate.
-            direction_key: Attribute holding the truth direction unit vector of
-                shape `[batch_size, 3]`. Skipped when absent.
-            position_keys: Attributes holding the truth vertex x- and
-                y-coordinates. Skipped when absent.
-            azimuth_key: Attribute holding the truth azimuth. Skipped when
-                absent.
-        """
+        """Construct `RandomRotationCallback`."""
         super().__init__()
         self._x_index = x_index
         self._y_index = y_index
         self._direction_key = direction_key
         self._position_keys = position_keys
         self._azimuth_key = azimuth_key
+        self._node_xy_origin = node_xy_origin
+        self._position_xy_origin = position_xy_origin
 
         self._generator = torch.Generator(device="cpu")
         if seed is None:
@@ -342,7 +320,12 @@ class RandomRotationCallback(Callback):
         cos_node = cos_event[data.batch].to(data.x.dtype)
         sin_node = sin_event[data.batch].to(data.x.dtype)
         self._rotate_pair(
-            data.x, self._x_index, self._y_index, cos_node, sin_node
+            data.x,
+            self._x_index,
+            self._y_index,
+            cos_node,
+            sin_node,
+            self._node_xy_origin,
         )
 
         direction = getattr(data, self._direction_key, None)
@@ -361,8 +344,11 @@ class RandomRotationCallback(Callback):
         if pos_x is not None and pos_y is not None:
             cos_pos = cos_event.to(pos_x.dtype)
             sin_pos = sin_event.to(pos_x.dtype)
-            rotated_x = pos_x * cos_pos - pos_y * sin_pos
-            rotated_y = pos_x * sin_pos + pos_y * cos_pos
+            origin_x, origin_y = self._position_xy_origin
+            x = pos_x - origin_x
+            y = pos_y - origin_y
+            rotated_x = x * cos_pos - y * sin_pos + origin_x
+            rotated_y = x * sin_pos + y * cos_pos + origin_y
             setattr(data, x_key, rotated_x)
             setattr(data, y_key, rotated_y)
 
@@ -381,20 +367,18 @@ class RandomRotationCallback(Callback):
         y_index: int,
         cos: Tensor,
         sin: Tensor,
+        origin: Tuple[float, float] = (0.0, 0.0),
     ) -> None:
-        """Rotate columns `x_index`/`y_index` of `tensor` in place."""
-        x = tensor[:, x_index].clone()
-        y = tensor[:, y_index].clone()
-        tensor[:, x_index] = x * cos - y * sin
-        tensor[:, y_index] = x * sin + y * cos
+        """Rotate columns `x_index`/`y_index` of `tensor` about `origin`."""
+        origin_x, origin_y = origin
+        x = tensor[:, x_index].clone() - origin_x
+        y = tensor[:, y_index].clone() - origin_y
+        tensor[:, x_index] = x * cos - y * sin + origin_x
+        tensor[:, y_index] = x * sin + y * cos + origin_y
 
 
 def _percentiles(values: Tensor, quantiles: Tuple[float, ...]) -> Tensor:
-    """Return the linear-interpolated `quantiles` of `values`.
-
-    Equivalent to `torch.quantile(..., interpolation="linear")` but without its
-    input-size ceiling, which a full epoch of per-event values can exceed.
-    """
+    """Return the linear-interpolated `quantiles` of `values`."""
     ordered, _ = torch.sort(values)
     n = ordered.numel()
     positions = torch.tensor(
@@ -462,24 +446,7 @@ class PerEventStats(Metric):
 
 
 class PhysicsMetricsCallback(Callback):
-    """Log per-event reconstruction quality alongside the training loss.
-
-    Reports the mean, 10th percentile, median and 90th percentile of
-
-    - `position_error_m`: distance between true and reconstructed vertex,
-    - `angular_error_deg`: opening angle between true and reconstructed
-      direction,
-    - `kappa`: the predicted von Mises-Fisher concentration,
-    - `vmf_calibration`: `angular_error_rad * sqrt(kappa)`, which concentrates
-      around a fixed value when `kappa` is well calibrated,
-
-    for both the training and validation split, plus `position_sigma_m` and
-    `position_pull` when the position head carries a sigma output, and
-    `angular_error_deg_sel` over events above `sel_energy_min`.
-
-    Metrics are read off `PerEventRecordingLoss` wrappers (wrap each
-    task's *outermost* loss). Accumulation is epoch-wide and DDP-safe.
-    """
+    """Log per-event reconstruction quality alongside the training loss."""
 
     def __init__(
         self,
@@ -488,19 +455,7 @@ class PhysicsMetricsCallback(Callback):
         position_scale: float = 1.0,
         sel_energy_min: Optional[float] = 10.0,
     ) -> None:
-        """Construct `PhysicsMetricsCallback`.
-
-        Args:
-            position_loss_name: `metric_name` of the `PerEventRecordingLoss`
-                wrapping the vertex loss. An unmatched name simply skips the
-                vertex metrics.
-            direction_loss_name: `metric_name` of the `PerEventRecordingLoss`
-                wrapping the direction loss.
-            position_scale: Metres per unit of the recorded (transformed)
-                position values.
-            sel_energy_min: True-energy threshold for
-                `angular_error_deg_sel`. None disables the metric.
-        """
+        """Construct `PhysicsMetricsCallback`."""
         super().__init__()
         self._position_loss_name = position_loss_name
         self._direction_loss_name = direction_loss_name
@@ -508,8 +463,6 @@ class PhysicsMetricsCallback(Callback):
         self._sel_energy_min = sel_energy_min
         self._keys = (
             "position_error_m",
-            "position_sigma_m",
-            "position_pull",
             "angular_error_deg",
             "angular_error_deg_sel",
             "kappa",
@@ -520,8 +473,6 @@ class PhysicsMetricsCallback(Callback):
             for phase in ("train", "val")
         }
         self._optional_keys = {
-            "position_sigma_m",
-            "position_pull",
             "angular_error_deg_sel",
         }
         self._applicable: Dict[str, Set[str]] = {
@@ -565,17 +516,6 @@ class PhysicsMetricsCallback(Callback):
                     prediction[:, :3] - target[:, :3], dim=1
                 )
             )
-            if prediction.size(1) >= 4:
-                # Fourth column is log(sigma). `position_pull` follows a
-                # chi(3) when calibrated: median ~1.538.
-                sigma = prediction[:, 3].exp()
-                values["position_sigma_m"] = self._position_scale * sigma
-                values["position_pull"] = (
-                    torch.linalg.vector_norm(
-                        prediction[:, :3] - target[:, :3], dim=1
-                    )
-                    / sigma
-                )
 
         direction = recorders.get(self._direction_loss_name)
         if (
@@ -624,12 +564,7 @@ class PhysicsMetricsCallback(Callback):
 
     @staticmethod
     def _prewarm_lightning_metric_cache(trainer: Optional[Trainer]) -> None:
-        """Touch Lightning's metric cache on every rank.
-
-        The progress bar reads `trainer.progress_bar_metrics` on rank zero
-        only, which fires `sync_dist=True` collectives. Those would otherwise
-        deadlock against this callback's own gather, which runs on all ranks.
-        """
+        """Touch Lightning's metric cache on every rank."""
         if trainer is None:
             return
         try:

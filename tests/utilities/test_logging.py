@@ -254,3 +254,40 @@ def test_multiprocessing_logger(nb_workers: int = 5) -> None:
             multiprocessing.get_start_method().capitalize()
             + f"PoolWorker-{ix_worker + 1}"
         ) in contents
+
+
+def test_existing_log_survives_unavailable_cwd(tmp_path, monkeypatch):
+    """An epoch-end Logger() must reuse its open file if getcwd fails."""
+    import pytest
+
+    clear_graphnet_loggers()
+    original = Logger(log_folder=str(tmp_path / "surviving.log"))
+    handlers = list(original.handlers)
+
+    def missing_cwd():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "getcwd", missing_cwd)
+        with pytest.warns(RuntimeWarning, match="Working directory"):
+            restored = Logger()
+        assert list(restored.handlers) == handlers
+        restored.info("logging still works")
+    assert "logging still works" in (tmp_path / "surviving.log").read_text()
+
+
+def test_new_log_falls_back_to_stream_without_cwd(monkeypatch):
+    """Missing cwd must not prevent configuring a new stream-only logger."""
+    import pytest
+
+    clear_graphnet_loggers()
+
+    def missing_cwd():
+        raise FileNotFoundError(2, "No such file or directory")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "getcwd", missing_cwd)
+        with pytest.warns(RuntimeWarning, match="Working directory"):
+            logger = Logger()
+        assert not logger.file_handlers
+        assert any(isinstance(h, logging.StreamHandler) for h in logger.handlers)

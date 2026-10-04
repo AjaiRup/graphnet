@@ -1,8 +1,3 @@
-# IceCube-86 joint direction + vertex reconstruction.
-#
-# Set DATA_ROOT before use; the training entry point expands it.
-# `selection: null` hands the split to `seeded_event_splits`' seeded
-# 80/10/10 partition.
 path:
   - $DATA_ROOT/nue.db
   - $DATA_ROOT/numu.db
@@ -16,28 +11,23 @@ data_representation:
     node_definition:
       class_name: IceMixNodes
       arguments:
-        input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, hlc]
+        input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, rde]
         max_pulses: 256
         z_name: dom_z
-        hlc_name: hlc
+        hlc_name: null
         add_ice_properties: false
-    input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, hlc]
+    input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, rde]
     dtype: torch.float32
-    # `DeepIce` reads only `data.x` and `data.batch`; copying every column back
-    # out as its own per-node attribute roughly halves dataloader throughput.
     add_static_features: false
 pulsemaps:
   - SRTInIcePulses
-# Column 5 (`hlc`) is embedded as a binary flag by `FourierEncoder`.
-# `pmt_area` would sit at index 6, past `n_features`, and never reaches a
-# layer.
 features:
   - dom_x
   - dom_y
   - dom_z
   - dom_time
   - charge
-  - hlc
+  - rde
 truth:
   - energy
   - energy_track

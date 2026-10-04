@@ -383,14 +383,12 @@ class Block_rel(LightningModule):
             kv = xn if kv is None else self.norm1(kv)
             x = x + self.drop_path(
                 self.gamma_1
-                * self.drop_path(
-                    self.attn(
-                        xn,
-                        kv,
-                        kv,
-                        rel_pos_bias=rel_pos_bias,
-                        key_padding_mask=key_padding_mask,
-                    )
+                * self.attn(
+                    xn,
+                    kv,
+                    kv,
+                    rel_pos_bias=rel_pos_bias,
+                    key_padding_mask=key_padding_mask,
                 )
             )
             x = x + self.drop_path(self.gamma_2 * self.mlp(self.norm2(x)))

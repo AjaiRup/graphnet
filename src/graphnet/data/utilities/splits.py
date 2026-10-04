@@ -17,33 +17,7 @@ def seeded_event_splits(
     truth_table: str = "truth",
     cache_dir: Optional[str] = None,
 ) -> Dict[str, List[List[int]]]:
-    """Split each database in `paths` into train/validation/test selections.
-
-    Event indices are read per database, shuffled with a fixed seed and sliced
-    by `ratio`. The split is therefore reproducible, and - crucially -
-    *positional*: the returned lists line up one-to-one with `paths`. Index
-    columns are not necessarily unique across databases (IceCube flavour
-    samples routinely all start at `event_no = 0`), so a single flat selection
-    applied to every database would leak events between splits.
-
-    Args:
-        paths: Paths to the SQLite databases to split, in order.
-        seed: Seed of the shuffle. The same seed and ratio always produce the
-            same partition for a given database.
-        ratio: Fractions `[train, validation, test]`. The train and validation
-            sizes are `floor(n * ratio[i])` and the test split takes every
-            remaining event, so `ratio[2]` is advisory. Defaults to
-            `[0.8, 0.1, 0.1]`.
-        index_column: Name of the event index column.
-        truth_table: Name of the table holding one row per event.
-        cache_dir: If given, resolved splits are cached here as JSON, keyed by
-            database, seed and ratio. Enumerating `event_no` is a full table
-            scan on databases without an index on `index_column`.
-
-    Returns:
-        Mapping of `"train"`, `"validation"` and `"test"` to a list of event
-        index lists, one per entry in `paths`.
-    """
+    """Split each database in `paths` into train/validation/test selections."""
     if ratio is None:
         ratio = [0.8, 0.1, 0.1]
     if len(ratio) != 3:

@@ -119,17 +119,19 @@ class StandardModel(EasySyntax):
     def forward(
         self, data: Union[Data, List[Data]]
     ) -> List[Union[Tensor, Data]]:
-        """Forward pass, chaining model components."""
+        """Route shared or per-task backbone readouts to the task heads."""
         if isinstance(data, Data):
             data = [data]
-        x_list = []
-        for d in data:
-            x = self.backbone(d)
-            x_list.append(x)
-        x = torch.cat(x_list, dim=0)
-
-        preds = [task(x) for task in self._tasks]
-        return preds
+        readouts = [self.backbone(d) for d in data]
+        if isinstance(readouts[0], tuple):
+            if any(len(x) != len(self._tasks) for x in readouts):
+                raise ValueError("Expected one backbone readout per task.")
+            return [
+                task(torch.cat([x[i] for x in readouts], dim=0))
+                for i, task in enumerate(self._tasks)
+            ]
+        x = torch.cat(readouts, dim=0)
+        return [task(x) for task in self._tasks]
 
     def shared_step(self, batch: List[Data], batch_idx: int) -> Tensor:
         """Perform shared step.

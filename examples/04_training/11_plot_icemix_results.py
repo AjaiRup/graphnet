@@ -1,21 +1,4 @@
-"""Generate resolution plots for one or more IceMix runs.
-
-The plotting logic lives in `graphnet.utilities.plotting`; this is the
-command line around it.
-
-    # every run under outputs/, compared against a named baseline
-    python examples/04_training/11_plot_icemix_results.py \
-        --base-dir outputs --reference IceMix-Standard
-
-    # a single run, plus its training curve
-    python examples/04_training/11_plot_icemix_results.py \
-        --results outputs/my-run/predictions/results.csv \
-        --metrics-csv outputs/my-run/logs/training/version_0/metrics.csv
-
-    # a token-drop robustness sweep
-    python examples/04_training/11_plot_icemix_results.py \
-        --token-drop-sweep outputs/token_drop_sweep
-"""
+"""Plot angular/vertex resolution and training curves for IceMix runs."""
 
 import os
 from typing import Any, Dict
@@ -28,10 +11,10 @@ from graphnet.utilities.plotting import (
     DEFAULT_ENERGY_BINS,
     DEFAULT_LOG_ENERGY_RANGE,
     METRICS,
+    filter_by_flavours,
     find_results,
     load_results,
     plot_resolution_vs_energy,
-    plot_token_drop_sweep,
     plot_training_curve,
     resolution_statistics,
 )
@@ -57,6 +40,22 @@ def main(args: Any) -> None:
         named_results[args.reference_label] = load_results(
             args.reference_csv, REQUIRED_COLUMNS
         )
+
+    if args.flavours:
+        for label in list(named_results):
+            before = len(named_results[label])
+            named_results[label] = filter_by_flavours(
+                named_results[label], args.flavours
+            )
+            logger.info(
+                f"{label}: kept {len(named_results[label])}/{before} events "
+                f"with |pid| in {sorted(args.flavours)}"
+            )
+            if named_results[label].empty:
+                logger.warning(
+                    f"{label} has no events left after the flavour filter; "
+                    "its curves and ratios will be empty."
+                )
 
     if named_results:
         if args.reference and args.reference not in named_results:
@@ -93,20 +92,10 @@ def main(args: Any) -> None:
     else:
         logger.warning("No results CSVs found; skipping resolution plots.")
 
-    # These two return None when their input is absent, unlike
-    # `plot_resolution_vs_energy` above, which always returns a list.
     if args.metrics_csv:
         curve = plot_training_curve(args.metrics_csv, args.output_dir)
         if curve:
             written.append(curve)
-
-    if args.token_drop_sweep:
-        for metric in args.metrics:
-            sweep = plot_token_drop_sweep(
-                args.token_drop_sweep, args.output_dir, metric=metric
-            )
-            if sweep:
-                written.append(sweep)
 
     for path in written:
         logger.info(f"Wrote {path}")
@@ -152,12 +141,15 @@ if __name__ == "__main__":
     parser.add_argument(
         "--statistics-csv",
         default=None,
-        help="Write cursor-style binned metrics and reference ratios to CSV.",
+        help="Write binned metrics and reference ratios to CSV.",
     )
     parser.add_argument(
-        "--token-drop-sweep",
+        "--flavours",
+        nargs="+",
+        type=int,
         default=None,
-        help="Directory of `10_evaluate_token_drop_robustness.py` output.",
+        metavar="PID",
+        help="Keep selected absolute neutrino PIDs (12, 14, 16) in every run.",
     )
     parser.add_argument("--energy-bins", type=int, default=DEFAULT_ENERGY_BINS)
     parser.add_argument(

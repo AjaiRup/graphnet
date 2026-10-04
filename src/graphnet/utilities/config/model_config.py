@@ -172,6 +172,9 @@ class ModelConfig(BaseConfig):
                 assert match
                 exec(source)
                 fn = eval(match.group("function_name"))
+                # Dynamically executed functions have no inspectable source file.
+                # Preserve their source just as we do for deserialized lambdas.
+                fn._source = source
                 return fn
             else:
                 raise ValueError(
@@ -220,7 +223,11 @@ class ModelConfig(BaseConfig):
                 return "!" + source
             else:
                 try:
-                    source = inspect.getsource(obj)
+                    source = (
+                        obj._source
+                        if hasattr(obj, "_source")
+                        else inspect.getsource(obj)
+                    )
                     match = re.match(FUNCTION_DEFINITION_PATTERN, source)
                     if match and match.group("function_name"):
                         return f"!function {source}"

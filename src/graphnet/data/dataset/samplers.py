@@ -294,15 +294,7 @@ class LenMatchBatchSampler(BatchSampler, Logger):
 
 
 class LengthGroupedSampler(DistributedSampler):
-    """Order events so that neighbouring indices have similar pulse counts.
-
-    Shuffles, cuts the order into megabatches of `group_factor` global
-    steps, and sorts each megabatch by pulse count, so every batch is
-    length-matched and every rank pads to the same length per DDP step.
-    Nothing is dropped. Lengths come from a caller-supplied array
-    (`graphnet.data.utilities.lengths`) rather than from rebuilding every
-    event once per epoch.
-    """
+    """Order events so that neighbouring indices have similar pulse counts."""
 
     def __init__(
         self,
@@ -314,29 +306,7 @@ class LengthGroupedSampler(DistributedSampler):
         seed: int = 42,
         group_factor: int = 16,
     ) -> None:
-        """Construct `LengthGroupedSampler`.
-
-        Args:
-            lengths: Number of pulses of each event, indexed the way the
-                `Dataset` is indexed. For an `EnsembleDataset` that is the
-                concatenation of the constituents' selections, which is what
-                `graphnet.data.utilities.lengths.event_lengths` returns.
-            batch_size: Events per batch, per rank. Must match the
-                `DataLoader`'s, or a batch will straddle two megabatches.
-            num_replicas: Number of ranks. Read from the process group when
-                omitted, which requires the group to already exist -- pass it
-                explicitly when building dataloaders before `Trainer.fit`.
-            rank: This process' rank. Likewise.
-            shuffle: Reshuffle every epoch. Set False for validation, so that
-                batch composition -- and hence `val_loss` -- is stable across
-                epochs.
-            seed: Base seed. The shuffle uses `seed + epoch`, and every rank
-                must pass the same value or they will disagree about the order.
-            group_factor: Megabatch size in global steps. Larger is
-                tighter and faster but makes each optimiser step's sample
-                length-homogeneous; `accumulate_grad_batches` restores the
-                diversity. 1 reproduces random batching.
-        """
+        """Construct `LengthGroupedSampler`."""
         if batch_size < 1:
             raise ValueError(f"`batch_size` must be >= 1. Got {batch_size}.")
         if group_factor < 1:

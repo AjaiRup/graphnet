@@ -1,9 +1,4 @@
-"""Utilities for reading and caching the number of pulses per event.
-
-Counts are read straight from the pulsemap rather than by constructing
-events. The cache contract mirrors `seeded_event_splits`: a `cache_dir`,
-one `.npz` file per database, keyed by the database's basename.
-"""
+"""Utilities for reading and caching the number of pulses per event."""
 
 import os
 import sqlite3
@@ -35,19 +30,7 @@ def pulse_counts(
     index_column: str = "event_no",
     cache_dir: Optional[str] = None,
 ) -> PulseCountIndex:
-    """Return the number of pulses of every event in `path`.
-
-    Args:
-        path: Path to the SQLite database.
-        pulsemap: Name of the table holding one row per pulse.
-        index_column: Name of the event index column.
-        cache_dir: If given, counts are read from - and on a miss written
-            to - this directory; without it the pulsemap is scanned on
-            every call.
-
-    Returns:
-        `(event_no, n_pulses)`, both sorted ascending by `event_no`.
-    """
+    """Return the number of pulses of every event in `path`."""
     logger = Logger()
 
     if cache_dir is not None:
@@ -106,29 +89,7 @@ def event_lengths(
     cache_dir: Optional[str] = None,
     max_pulses: Optional[int] = None,
 ) -> np.ndarray:
-    """Return pulse counts positionally, in `EnsembleDataset` order.
-
-    `paths` and `selections` line up one-to-one, and the selections are
-    concatenated in order - which is exactly how `EnsembleDataset` (a
-    `ConcatDataset`) indexes its constituents. The returned array can
-    therefore be indexed by the same integer a `Sampler` yields.
-
-    The per-database index is dropped as soon as it has been used, so peak
-    memory is one database's counts rather than all of them.
-
-    Args:
-        paths: Paths to the SQLite databases, in dataset order.
-        selections: Event indices read from each database, in dataset order.
-        pulsemap: Name of the table holding one row per pulse.
-        index_column: Name of the event index column.
-        cache_dir: Passed to `pulse_counts`.
-        max_pulses: If given, counts are clipped here - matching the cap
-            `IceMixNodes` applies - so grouping sees the length the model
-            will actually process.
-
-    Returns:
-        `int32` array of length `sum(len(s) for s in selections)`.
-    """
+    """Return pulse counts positionally, in `EnsembleDataset` order."""
     if len(paths) != len(selections):
         raise ValueError(
             f"Got {len(paths)} path(s) but {len(selections)} selection(s); "

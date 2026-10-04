@@ -38,10 +38,7 @@ class DataLoader(torch.utils.data.DataLoader):
         **kwargs: Any,
     ) -> None:
         """Construct `DataLoader`."""
-        # `batch_sampler` already encodes batch size, ordering and remainder
-        # handling, so `torch` rejects it alongside `batch_size`, `shuffle`,
-        # `sampler` or `drop_last`. Drop those rather than make every caller
-        # that wants a custom batching scheme reach past this class.
+        # A batch sampler supplies its own batch size and ordering.
         common = dict(
             num_workers=num_workers,
             collate_fn=collate_fn,

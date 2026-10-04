@@ -7,6 +7,7 @@ import numpy as np
 import torch
 from pytorch_lightning import Callback, Trainer
 from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint
+from pytorch_lightning.strategies import Strategy
 from torch import Tensor
 from torch.nn import ModuleList
 from torch.optim import Adam
@@ -106,7 +107,7 @@ class EasySyntax(Model):
         logger: Optional[LightningLogger] = None,
         log_every_n_steps: int = 1,
         gradient_clip_val: Optional[float] = None,
-        distribution_strategy: Optional[str] = "ddp",
+        distribution_strategy: Optional[Union[str, Strategy]] = "ddp",
         **trainer_kwargs: Any,
     ) -> Trainer:
         if gpus:
@@ -143,7 +144,7 @@ class EasySyntax(Model):
         logger: Optional[LightningLogger] = None,
         log_every_n_steps: int = 1,
         gradient_clip_val: Optional[float] = None,
-        distribution_strategy: Optional[str] = "ddp",
+        distribution_strategy: Optional[Union[str, Strategy]] = "ddp",
         **trainer_kwargs: Any,
     ) -> None:
         """Fit `StandardModel` using `pytorch_lightning.Trainer`."""

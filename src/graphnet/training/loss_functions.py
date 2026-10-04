@@ -385,18 +385,7 @@ class VonMisesFisherLoss(LossFunction):
         approximation: str = "tight",
         **kwargs: Any,
     ) -> None:
-        """Construct `VonMisesFisherLoss`.
-
-        Args:
-            kappa_switch: Value of `kappa` above which an asymptotic
-                approximation is used in place of the exact `log_cmk_exact`.
-                `log_cmk_exact` overflows in float64 for `kappa` >~ 710, which
-                bounds this from above.
-            approximation: Which asymptotic form to use above `kappa_switch`,
-                `"bound"` or `"tight"`. See `log_cmk_approx_tight` for the
-                trade-off between them.
-            kwargs: Additional arguments passed to `LossFunction`.
-        """
+        """Construct `VonMisesFisherLoss`."""
         super().__init__(**kwargs)
         self._kappa_switch = kappa_switch
         self._approximation = approximation
@@ -450,22 +439,7 @@ class VonMisesFisherLoss(LossFunction):
     def log_cmk_approx_tight(
         cls, m: int, kappa: Tensor
     ) -> Tensor:  # pylint: disable=invalid-name
-        """Calculate $log C_{m}(k)$ approximately, favouring accuracy.
-
-        For `m = 3` the exact term is
-        `log C_3(k) = log(k) - log(4 * pi * sinh(k))`. In `log_cmk_approx` the
-        coefficient `b = v - 1` vanishes identically at `m = 3`, dropping the
-        leading `log(k)`; its error, and its error on `d/dk`, then grow without
-        bound in `kappa`. This form keeps that term: its residual against the
-        exact value tends to the constant `log(2 * pi)`, and constants do not
-        reach the gradient.
-
-        The trade-off is that it is *not* a lower bound on `log_cmk_exact` -
-        anchored at small `kappa` it sits slightly above, so the resulting loss
-        is no longer a strict upper bound on the negative log-likelihood. Which
-        property matters more is a modelling choice, hence the
-        `approximation` argument.
-        """
+        """Calculate $log C_{m}(k)$ approximately, favouring accuracy."""
         v = m / 2.0
         a = torch.sqrt((v + 0.5) ** 2 + kappa**2)
         b = v - 0.5
@@ -597,26 +571,6 @@ class EuclideanDistanceLoss(LossFunction):
         return torch.sqrt(
             torch.clamp_min(squared, torch.finfo(squared.dtype).eps)
         )
-
-
-class IsotropicGaussianNLLLoss(LossFunction):
-    """Negative log-likelihood for 3D position and isotropic log-sigma."""
-
-    def __init__(self, detach_position: bool = False, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self._detach_position = detach_position
-
-    def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
-        """Return elementwise NLL terms for [position, log-sigma] inputs."""
-        # The exponential can overflow fp16 at the task's clamp.
-        prediction = prediction.float()
-        target = target.reshape(-1, 3).float()
-        log_sigma = prediction[:, 3]
-        position = prediction[:, :3]
-        if self._detach_position:
-            position = position.detach()
-        squared = ((position - target) ** 2).sum(dim=-1)
-        return 3.0 * log_sigma + 0.5 * squared * torch.exp(-2.0 * log_sigma)
 
 
 class VonMisesFisher3DLoss(VonMisesFisherLoss):
@@ -753,11 +707,7 @@ class NegCosLoss(LossFunction):
 
 
 class PerEventRecordingLoss(LossFunction):
-    """Transparent wrapper that retains a loss' most recent per-event terms.
-
-    Gradient-identical to the wrapped loss; stashes the detached
-    prediction, target and elementwise terms for metric callbacks.
-    """
+    """Transparent wrapper that retains a loss' most recent per-event terms."""
 
     def __init__(
         self,
@@ -765,15 +715,7 @@ class PerEventRecordingLoss(LossFunction):
         metric_name: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
-        """Construct `PerEventRecordingLoss`.
-
-        Args:
-            loss_function: The loss function to delegate to.
-            metric_name: Label under which consumers - e.g.
-                `PhysicsMetricsCallback` - locate this wrapper among a model's
-                loss functions.
-            kwargs: Additional arguments passed to `LossFunction`.
-        """
+        """Construct `PerEventRecordingLoss`."""
         super().__init__(**kwargs)
         self._loss_function = loss_function
         self.metric_name = metric_name

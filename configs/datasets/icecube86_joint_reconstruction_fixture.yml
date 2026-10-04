@@ -1,12 +1,3 @@
-# Smoke-test variant of icecube86_joint_reconstruction.yml.
-#
-# Upstream's 5-event IceCube-86 fixture. Same tables and columns as
-# the production databases, including `hlc` and `rde`, and likewise
-# without `interaction_time`.
-#
-# The feature list must stay in step with the production config and with the
-# entry point's `--features` default: `GraphDefinition` asserts that the
-# columns it is handed match the ones it was built with.
 path: $GRAPHNET/data/tests/sqlite/oscNext_genie_level7_v02/oscNext_genie_level7_v02_first_5_frames.db
 data_representation:
   class_name: GraphDefinition
@@ -17,12 +8,12 @@ data_representation:
     node_definition:
       class_name: IceMixNodes
       arguments:
-        input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, hlc]
-        max_pulses: 32
+        input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, rde]
+        max_pulses: 256
         z_name: dom_z
-        hlc_name: hlc
+        hlc_name: null
         add_ice_properties: false
-    input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, hlc]
+    input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, rde]
     dtype: torch.float32
     add_static_features: false
 pulsemaps:
@@ -33,7 +24,7 @@ features:
   - dom_z
   - dom_time
   - charge
-  - hlc
+  - rde
 truth:
   - energy
   - energy_track

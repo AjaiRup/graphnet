@@ -70,19 +70,9 @@ class DirectionReconstructionWithKappa(StandardLearnedTask):
 
 
 class DirectionReconstructionWithKappaDecoupled(StandardLearnedTask):
-    """Reconstruct direction and vMF kappa as independent outputs.
+    """Reconstruct direction and vMF kappa as independent outputs."""
 
-    `DirectionReconstructionWithKappa` ties the concentration of the von
-    Mises-Fisher distribution to the norm of the predicted direction vector,
-    so a single 3-vector carries both pointing and confidence. This task
-    instead predicts a fourth, dedicated output for kappa, letting the model
-    express a confident prediction and a small-magnitude direction vector - or
-    the reverse - independently.
-    """
-
-    # Requires four features: (x,y,z)-space direction and kappa.
-    default_target_labels = ["direction"]  # contains dir_x, dir_y, dir_z
-    # see Direction label in /src/graphnet/training/labels.py
+    default_target_labels = ["direction"]
     default_prediction_labels = [
         "dir_x_pred",
         "dir_y_pred",
@@ -92,7 +82,6 @@ class DirectionReconstructionWithKappaDecoupled(StandardLearnedTask):
     nb_inputs = 4
 
     def _forward(self, x: Tensor) -> Tensor:
-        # Transform outputs to angle and prepare prediction
         norm = torch.linalg.vector_norm(x[:, [0, 1, 2]], dim=1) + eps_like(x)
         vec_x = x[:, 0] / norm
         vec_y = x[:, 1] / norm
@@ -100,22 +89,6 @@ class DirectionReconstructionWithKappaDecoupled(StandardLearnedTask):
         kappa = torch.abs(x[:, 3])
         return torch.stack((vec_x, vec_y, vec_z, kappa), dim=1)
 
-
-class PositionReconstructionWithSigma(StandardLearnedTask):
-    """Reconstruct vertex position and isotropic log-sigma."""
-
-    default_target_labels = ["position_x", "position_y", "position_z"]
-    default_prediction_labels = [
-        "position_x_pred",
-        "position_y_pred",
-        "position_z_pred",
-        "position_sigma",
-    ]
-    nb_inputs = 4
-
-    def _forward(self, x: Tensor) -> Tensor:
-        # Keep the NLL finite under mixed precision.
-        return torch.cat([x[:, :3], x[:, 3:4].clamp(-4.0, 4.0)], dim=1)
 
 
 class ZenithReconstruction(StandardLearnedTask):

@@ -1,13 +1,16 @@
 #!/bin/bash
 #SBATCH --job-name=icemix
+#SBATCH --account=gts-pli77-ideas_l40s
+#SBATCH --qos=inferno
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=8
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=0
-#SBATCH --time=72:00:00
+#SBATCH --gres=gpu:l40s:8
+#SBATCH --mem=256GB
+#SBATCH --time=18:00:00
 #SBATCH --output=slurm/logs/%x-%j.out
-# IceMix Slurm launcher. Set DATA_ROOT; site-specific allocation flags stay on
-# `sbatch`. Stage-2 and resume behavior are selected with the training flags.
+#SBATCH --mail-type=BEGIN,END,FAIL
+#SBATCH --mail-user=aruparelia@gatech.edu
 
 set -euo pipefail
 
@@ -24,7 +27,7 @@ cd "$REPO_ROOT"
 mkdir -p slurm/logs
 echo "repo root: $REPO_ROOT"
 
-DATA_ROOT="${DATA_ROOT:?set DATA_ROOT to the directory holding the input databases}"
+DATA_ROOT="${DATA_ROOT:-/storage/home/hcoda1/8/aruparelia3/scratch/ai4science_mle/data}"
 CONDA_ENV="${CONDA_ENV:-graphnet-gpu}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$REPO_ROOT/outputs}"
 
@@ -44,11 +47,80 @@ else
 fi
 echo "run directory: $OUTPUT_ROOT/$RUN_NAME"
 
+module load anaconda3/2023.03 2>/dev/null || true
+# shellcheck disable=SC1091
+conda activate "$CONDA_ENV"
+
+# Avoid packages leaking in from ~/.local.
+export PYTHONNOUSERSITE=1
+export PYTHONPATH="$REPO_ROOT/src${PYTHONPATH:+:$PYTHONPATH}"
+
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export OMP_NUM_THREADS=4
+export MKL_NUM_THREADS=4
+export TORCH_CUDNN_V8_API_ENABLED=1
+
+# Permit W&B's service process to start on loaded nodes.
+export WANDB__SERVICE_WAIT="${WANDB__SERVICE_WAIT:-300}"
+
+# Stream logs to the Slurm output file.
+export PYTHONUNBUFFERED=1
+
+# This runs before staging: a sick node costs seconds, not a 45 GiB copy.
+# Pass physical indices to Lightning: Slurm resets CUDA_VISIBLE_DEVICES per task.
+HEALTHY=""
+if command -v nvidia-smi >/dev/null 2>&1; then
+    if HEALTHY="$(python slurm/healthy_gpus.py)"; then
+        echo "Healthy GPUs: $HEALTHY"
+    else
+        echo "[FATAL] no healthy GPUs on $(hostname)"
+        exit 42
+    fi
+fi
+
+# Fail before training if the activated environment cannot use CUDA.
+python - <<'PYTHON' || exit 1
+import sys
+
+import torch
+
+print(
+    f"torch {torch.__version__} | cuda build {torch.version.cuda} | "
+    f"{torch.cuda.device_count()} device(s) visible"
+)
+if not torch.cuda.is_available():
+    print("[FATAL] no CUDA device. Either this env is a CPU-only build")
+    print("        (check torch.version.cuda) or the job has no GPU.")
+    sys.exit(1)
+for index in range(torch.cuda.device_count()):
+    print(f"  device {index}: {torch.cuda.get_device_name(index)}")
+PYTHON
+
+# One srun task uses each selected physical GPU.
+if [ -n "$HEALTHY" ]; then
+    GPU_LIST="${HEALTHY//,/ }"
+else
+    NGPU_ALL="$(python -c 'import torch; print(torch.cuda.device_count())')"
+    GPU_LIST="$(seq -s' ' 0 $((NGPU_ALL - 1)))"
+fi
+NGPU="$(echo "$GPU_LIST" | wc -w)"
+echo "Training on $NGPU GPU(s): $GPU_LIST"
+
+# A smaller GPU world changes effective batch size, RNG streams, and sampler shards.
+NGPU_ALLOC="${SLURM_GPUS_ON_NODE:-$NGPU}"
+MIN_HEALTHY="${MIN_HEALTHY_GPUS:-$NGPU_ALLOC}"
+if [ "$NGPU" -lt "$MIN_HEALTHY" ]; then
+    BAD_NODE="${SLURMD_NODENAME:-$(hostname)}"
+    echo "[FATAL] only $NGPU of $NGPU_ALLOC allocated GPU(s) are healthy on $BAD_NODE."
+    echo "        Resubmit with: sbatch --exclude=$BAD_NODE ... and report the node."
+    echo "        To accept a smaller world deliberately: MIN_HEALTHY_GPUS=$NGPU sbatch ..."
+    exit 43
+fi
+
 # Shared by staging and prewarming.
 DB_NEED_KB=$(du -ck "$DATA_ROOT"/nue.db "$DATA_ROOT"/numu.db \
     "$DATA_ROOT"/nutau.db 2>/dev/null | tail -1 | awk '{print $1}')
 
-# --- Optional node-local staging ---------------------------------------------
 # rsync verifies the file copy; a non-empty WAL means a file copy is unsafe.
 if [ "${LOCAL_STAGE:-1}" = "1" ]; then
     STAGE_DIR="${GRAPHNET_STAGE_DIR:-${TMPDIR:-/tmp}/icemix-stage-$USER}"
@@ -103,7 +175,6 @@ if [ "${LOCAL_STAGE:-1}" = "1" ]; then
 fi
 export DATA_ROOT
 
-# --- Optional page-cache warmup ----------------------------------------------
 if [ "${PREWARM:-1}" = "1" ]; then
     avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
 
@@ -133,65 +204,6 @@ if [ "${PREWARM:-1}" = "1" ]; then
     fi
 fi
 
-# --- Environment --------------------------------------------------------------
-module load anaconda3/2023.03 2>/dev/null || true
-# shellcheck disable=SC1091
-conda activate "$CONDA_ENV"
-
-# Avoid packages leaking in from ~/.local.
-export PYTHONNOUSERSITE=1
-
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export OMP_NUM_THREADS=4
-export MKL_NUM_THREADS=4
-export TORCH_CUDNN_V8_API_ENABLED=1
-
-# Permit W&B's service process to start on loaded nodes.
-export WANDB__SERVICE_WAIT="${WANDB__SERVICE_WAIT:-300}"
-
-# Stream logs to the Slurm output file.
-export PYTHONUNBUFFERED=1
-
-# --- Select healthy GPUs ------------------------------------------------------
-# Pass physical indices to Lightning: Slurm resets CUDA_VISIBLE_DEVICES per task.
-HEALTHY=""
-if command -v nvidia-smi >/dev/null 2>&1; then
-    if HEALTHY="$(python slurm/healthy_gpus.py)"; then
-        echo "Healthy GPUs: $HEALTHY"
-    else
-        echo "[FATAL] no healthy GPUs on $(hostname)"
-        exit 42
-    fi
-fi
-
-# Fail before training if the activated environment cannot use CUDA.
-python - <<'PYTHON' || exit 1
-import sys
-
-import torch
-
-print(
-    f"torch {torch.__version__} | cuda build {torch.version.cuda} | "
-    f"{torch.cuda.device_count()} device(s) visible"
-)
-if not torch.cuda.is_available():
-    print("[FATAL] no CUDA device. Either this env is a CPU-only build")
-    print("        (check torch.version.cuda) or the job has no GPU.")
-    sys.exit(1)
-for index in range(torch.cuda.device_count()):
-    print(f"  device {index}: {torch.cuda.get_device_name(index)}")
-PYTHON
-
-# One srun task uses each selected physical GPU.
-if [ -n "$HEALTHY" ]; then
-    GPU_LIST="${HEALTHY//,/ }"
-else
-    NGPU_ALL="$(python -c 'import torch; print(torch.cuda.device_count())')"
-    GPU_LIST="$(seq -s' ' 0 $((NGPU_ALL - 1)))"
-fi
-NGPU="$(echo "$GPU_LIST" | wc -w)"
-echo "Training on $NGPU GPU(s): $GPU_LIST"
-
 # Size workers per rank; an explicit --num-workers still wins.
 CPUS="${SLURM_CPUS_ON_NODE:-}"
 if [ -z "$CPUS" ]; then
@@ -203,7 +215,6 @@ NUM_WORKERS=$((CPUS_PER_TASK > 1 ? CPUS_PER_TASK - 1 : 1))
 echo "$CPUS core(s) over $NGPU rank(s) -> --cpus-per-task $CPUS_PER_TASK," \
      "--num-workers $NUM_WORKERS"
 
-# --- Verify split-query indexes ----------------------------------------------
 python - <<'PYTHON'
 import os
 import sqlite3
@@ -226,7 +237,6 @@ for flavour in ("nue", "numu", "nutau"):
     )
 PYTHON
 
-# --- Run ----------------------------------------------------------------------
 echo "Job ${SLURM_JOB_ID:-local} started at $(date) on ${SLURM_JOB_NODELIST:-$(hostname)}"
 echo "Run name: $RUN_NAME"
 echo "Extra arguments: $*"
@@ -246,8 +256,5 @@ srun --ntasks="$NGPU" --ntasks-per-node="$NGPU" \
     --num-workers "$NUM_WORKERS" \
     "$@" || EXIT_CODE=$?
 
-# set -e is active, so a bare `EXIT_CODE=$?` after a failure would never
-# run -- the shell exits on the failing python first, so the `|| EXIT_CODE=$?`
-# above is what actually captures it.
 echo "Job finished with code $EXIT_CODE at $(date)"
 exit $EXIT_CODE
