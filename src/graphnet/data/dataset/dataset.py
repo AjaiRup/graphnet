@@ -1,5 +1,6 @@
 """Base :py:class:`Dataset` class(es) used in GraphNeT."""
 
+import os
 from copy import deepcopy
 from abc import ABC, abstractmethod
 from typing import (
@@ -231,7 +232,7 @@ class Dataset(
             return [cast(str, cls._resolve_graphnet_paths(p)) for p in path]
 
         assert isinstance(path, str)
-        return (
+        return os.path.expandvars(
             path.replace("$graphnet", GRAPHNET_ROOT_DIR)
             .replace("$GRAPHNET", GRAPHNET_ROOT_DIR)
             .replace("${graphnet}", GRAPHNET_ROOT_DIR)

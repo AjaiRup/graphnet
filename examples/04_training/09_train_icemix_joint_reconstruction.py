@@ -24,6 +24,7 @@ from graphnet.constants import (
 )
 from graphnet.data.dataloader import DataLoader, do_shuffle
 from graphnet.data.dataset import (
+    Dataset,
     DistributedLengthGroupedSampler,
     EnsembleDataset,
 )
@@ -39,7 +40,6 @@ from graphnet.training.labels import Direction
 from graphnet.utilities.argparse import ArgumentParser
 from graphnet.utilities.config import DatasetConfig, ModelConfig
 from graphnet.utilities.logging import Logger
-from graphnet.data.utilities.paths import resolve_dataset_paths
 from graphnet.data.utilities.splits import seeded_event_splits
 from graphnet.data.utilities.sqlite_utilities import query_database
 
@@ -128,7 +128,10 @@ def build_dataloaders(
         assert isinstance(dataloaders, dict)
         return dataloaders
 
-    paths = resolve_dataset_paths(dataset_config.path)
+    config_paths = dataset_config.path
+    if isinstance(config_paths, str):
+        config_paths = [config_paths]
+    paths = [str(Dataset._resolve_graphnet_paths(p)) for p in config_paths]
     missing = [path for path in paths if not os.path.exists(path)]
     if missing:
         raise FileNotFoundError(

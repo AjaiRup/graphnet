@@ -1,6 +1,5 @@
 """Utilities for use across `graphnet.data`."""
 
-from .paths import resolve_dataset_paths
 from .splits import seeded_event_splits
 from .sqlite_utilities import create_table_and_save_to_sql
 from .sqlite_utilities import get_primary_keys
