@@ -6,6 +6,7 @@ import argparse
 from datetime import timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 from pytorch_lightning.callbacks import (
     EarlyStopping,
@@ -35,9 +36,9 @@ from graphnet.training.labels import Direction
 from graphnet.utilities.argparse import ArgumentParser
 from graphnet.utilities.config import DatasetConfig
 from graphnet.utilities.logging import Logger
-from graphnet.data.utilities.lengths import event_lengths
 from graphnet.data.utilities.paths import resolve_dataset_paths
 from graphnet.data.utilities.splits import seeded_event_splits
+from graphnet.data.utilities.sqlite_utilities import query_database
 
 from graphnet.models.transformer.icemix import (
     POSITION_LABELS,
@@ -102,7 +103,6 @@ def build_dataloaders(
     split_ratio: List[float],
     split_cache_dir: Optional[str],
     group_factor: int = 0,
-    length_cache_dir: Optional[str] = None,
     max_pulses: Optional[int] = None,
     seed: int = 42,
     rank: int = 0,
@@ -162,6 +162,20 @@ def build_dataloaders(
         add_default_labels=False,
     )
 
+    pulse_counts = {}
+    if group_factor > 0:
+        index_column = dataset_config.index_column
+        query = (
+            f"SELECT {index_column}, COUNT(*) AS n_pulses "
+            f"FROM {dataset_config.pulsemaps[0]} GROUP BY {index_column}"
+        )
+        pulse_counts = {
+            path: query_database(path, query).set_index(index_column)[
+                "n_pulses"
+            ]
+            for path in paths
+        }
+
     dataloaders = {}
     for name, per_database in splits.items():
         # The pulse-count array must align with the datasets actually used.
@@ -180,14 +194,16 @@ def build_dataloaders(
         # `test` keeps a sequential sampler: `predict_as_dataframe` re-walks
         # the loader to align per-event attributes.
         if group_factor > 0 and name != "test":
-            lengths = event_lengths(
-                paths=used_paths,
-                selections=used_selections,
-                pulsemap=dataset_config.pulsemaps[0],
-                index_column=dataset_config.index_column,
-                cache_dir=length_cache_dir,
-                max_pulses=max_pulses,
+            lengths = np.concatenate(
+                [
+                    pulse_counts[path]
+                    .reindex(selection, fill_value=0)
+                    .to_numpy()
+                    for path, selection in zip(used_paths, used_selections)
+                ]
             )
+            if max_pulses is not None:
+                lengths = np.minimum(lengths, max_pulses)
             logger.info(
                 f"Length-grouping the '{name}' split at "
                 f"group_factor={group_factor} over {world_size} rank(s)."
@@ -337,7 +353,6 @@ def main(args: Any) -> None:
         split_ratio=[0.6, 0.2, 0.2] if args.smoke_test else [0.8, 0.1, 0.1],
         split_cache_dir=args.split_cache_dir or args.cache_dir,
         group_factor=args.group_factor,
-        length_cache_dir=args.length_cache_dir or args.cache_dir,
         max_pulses=max_pulses,
         seed=args.seed if args.seed is not None else 42,
         rank=rank,
@@ -553,14 +568,9 @@ def build_parser() -> ArgumentParser:
     data.add_argument(
         "--cache-dir",
         default=None,
-        help="Default cache directory for splits and pulse counts.",
+        help="Default cache directory for splits.",
     )
     data.add_argument("--split-cache-dir", default=None)
-    data.add_argument(
-        "--length-cache-dir",
-        default=None,
-        help="Cache directory for per-event pulse counts.",
-    )
 
     model_group = parser.add_argument_group("model")
     model_group.add_argument(

@@ -58,8 +58,7 @@ From the checkout root:
 export DATA_ROOT=/path/to/databases
 mkdir -p slurm/logs
 RUN_NAME=icemix-seed42 sbatch slurm/train_icemix.sh \
-    --split-cache-dir outputs/vertex-ablation/rde-vertex-ablation-v2/cache/splits \
-    --length-cache-dir outputs/vertex-ablation/rde-vertex-ablation-v2/cache/lengths
+    --split-cache-dir outputs/vertex-ablation/rde-vertex-ablation-v2/cache/splits
 ```
 
 Keep the existing seed-42 80/10/10 split cache. `--resume-from` restores an
