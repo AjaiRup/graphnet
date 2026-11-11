@@ -23,7 +23,10 @@ from graphnet.constants import (
     GRAPHNET_ROOT_DIR,
 )
 from graphnet.data.dataloader import DataLoader, do_shuffle
-from graphnet.data.dataset import EnsembleDataset, LengthGroupedSampler
+from graphnet.data.dataset import (
+    DistributedLengthGroupedSampler,
+    EnsembleDataset,
+)
 from graphnet.data.dataset.sqlite.sqlite_dataset import SQLiteDataset
 from graphnet.models import StandardModel
 from graphnet.models.data_representation import GraphDefinition
@@ -210,7 +213,7 @@ def build_dataloaders(
             )
             dataloaders[name] = DataLoader(
                 EnsembleDataset(datasets),
-                sampler=LengthGroupedSampler(
+                sampler=DistributedLengthGroupedSampler(
                     lengths=lengths,
                     batch_size=dataloader_kwargs["batch_size"],
                     num_replicas=world_size,

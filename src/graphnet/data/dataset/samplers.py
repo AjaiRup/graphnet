@@ -31,6 +31,7 @@ from typing import (
     Tuple,
     Iterator,
     Sequence,
+    Union,
 )
 
 from collections import defaultdict
@@ -293,86 +294,79 @@ class LenMatchBatchSampler(BatchSampler, Logger):
                 yield batch
 
 
-class LengthGroupedSampler(DistributedSampler):
-    """Order events so that neighbouring indices have similar pulse counts."""
+class DistributedLengthGroupedSampler(DistributedSampler):
+    """A `DistributedSampler` that batches events of similar length.
+
+    Each epoch is shuffled and split into megabatches of `group_factor` global
+    steps (`batch_size * num_replicas` events). Each megabatch is sorted by
+    length, so all ranks pad to a similar length within a step. Whole steps
+    are then shuffled so that step lengths do not trend within a megabatch.
+
+    Based on `DistributedLengthGroupedSampler` from HuggingFace Transformers
+    (`trainer_pt_utils.py`), which sizes megabatches per device rather than
+    per global step.
+    """
 
     def __init__(
         self,
-        lengths: Sequence[int],
+        lengths: Union[Sequence[int], np.ndarray],
         batch_size: int,
         num_replicas: Optional[int] = None,
         rank: Optional[int] = None,
         shuffle: bool = True,
-        seed: int = 42,
+        seed: int = 0,
         group_factor: int = 16,
     ) -> None:
-        """Construct `LengthGroupedSampler`."""
-        if batch_size < 1:
-            raise ValueError(f"`batch_size` must be >= 1. Got {batch_size}.")
-        if group_factor < 1:
-            raise ValueError(
-                f"`group_factor` must be >= 1. Got {group_factor}."
-            )
+        """Construct `DistributedLengthGroupedSampler`.
 
-        lengths_array = np.asarray(lengths, dtype=np.int64)
-        # The base class only ever calls `len()` on `dataset`, so the length
-        # array stands in for it and no `Dataset` has to be built here.
+        Args:
+            lengths: Length of each event (e.g. its number of pulses), in
+                dataset order.
+            batch_size: Events per batch on each rank. Must match the
+                `DataLoader` batch size.
+            num_replicas: Number of ranks. Defaults to the world size of the
+                current process group.
+            rank: Rank of this process. Defaults to the rank in the current
+                process group.
+            shuffle: Reshuffle events every epoch.
+            seed: Random seed. Must be the same on all ranks.
+            group_factor: Megabatch size in global steps. Larger values reduce
+                padding but narrow the spread of lengths within each step.
+        """
+        if batch_size < 1 or group_factor < 1:
+            raise ValueError("`batch_size` and `group_factor` must be >= 1.")
+        # `DistributedSampler` only uses `len(dataset)`.
         super().__init__(
-            lengths_array,  # type: ignore[arg-type]
+            lengths,  # type: ignore[arg-type]
             num_replicas=num_replicas,
             rank=rank,
             shuffle=shuffle,
             seed=seed,
-            drop_last=False,
         )
-        self._lengths = lengths_array
-        # One global step: what all ranks together consume per optimiser step.
+        self._lengths = np.asarray(lengths)
         self._step = batch_size * self.num_replicas
         self._megabatch = group_factor * self._step
 
     def __iter__(self) -> Iterator[int]:
-        """Return this rank's share of the epoch, grouped by pulse count."""
+        """Return the indices for this rank."""
+        generator = torch.Generator()
+        generator.manual_seed(
+            self.seed + self.epoch if self.shuffle else self.seed
+        )
+        n_events = len(self._lengths)
         if self.shuffle:
-            generator = torch.Generator()
-            generator.manual_seed(self.seed + self.epoch)
-            order = torch.randperm(
-                len(self._lengths), generator=generator
-            ).numpy()
+            order = torch.randperm(n_events, generator=generator).numpy()
         else:
-            order = np.arange(len(self._lengths))
+            order = np.arange(n_events)
+        order = np.resize(order, self.total_size)
 
-        # Repeat from the front to reach `total_size`, as `DistributedSampler`
-        # does, so every rank gets `num_samples` and nothing is dropped.
-        if self.total_size != len(order):
-            order = np.resize(order, self.total_size)
+        megabatch = np.arange(self.total_size) // self._megabatch
+        order = order[np.lexsort((-self._lengths[order], megabatch))]
 
-        order = np.concatenate(
-            [
-                block[np.argsort(-self._lengths[block], kind="stable")]
-                for block in (
-                    order[start : start + self._megabatch]
-                    for start in range(0, self.total_size, self._megabatch)
-                )
-            ]
-        )
-
-        # Permute whole global steps: a sorted megabatch would otherwise be
-        # walked in descending length order. Step contents are unchanged,
-        # preserving padding and rank alignment.
         n_steps = self.total_size // self._step
-        if n_steps > 1:
-            step_generator = torch.Generator()
-            step_generator.manual_seed(
-                self.seed + self.epoch if self.shuffle else self.seed
-            )
-            permutation = torch.randperm(
-                n_steps, generator=step_generator
-            ).numpy()
-            head = order[: n_steps * self._step].reshape(n_steps, self._step)
-            order = np.concatenate(
-                [head[permutation].reshape(-1), order[n_steps * self._step :]]
-            )
-
-        return iter(
-            order[self.rank : self.total_size : self.num_replicas].tolist()
+        steps = torch.randperm(n_steps, generator=generator).numpy()
+        full = order[: n_steps * self._step].reshape(n_steps, self._step)
+        order = np.concatenate(
+            [full[steps].ravel(), order[n_steps * self._step :]]
         )
+        return iter(order[self.rank :: self.num_replicas].tolist())

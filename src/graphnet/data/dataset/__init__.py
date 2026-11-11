@@ -9,7 +9,7 @@ if has_torch_package():
     from .samplers import (
         RandomChunkSampler,
         LenMatchBatchSampler,
-        LengthGroupedSampler,
+        DistributedLengthGroupedSampler,
     )
     from .parquet.parquet_dataset import ParquetDataset
     from .sqlite.sqlite_dataset import SQLiteDataset
