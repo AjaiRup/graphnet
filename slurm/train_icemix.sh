@@ -117,13 +117,11 @@ if [ "$NGPU" -lt "$MIN_HEALTHY" ]; then
     exit 43
 fi
 
-# Shared by staging and prewarming.
-DB_NEED_KB=$(du -ck "$DATA_ROOT"/nue.db "$DATA_ROOT"/numu.db \
-    "$DATA_ROOT"/nutau.db 2>/dev/null | tail -1 | awk '{print $1}')
-
 # rsync verifies the file copy; a non-empty WAL means a file copy is unsafe.
 if [ "${LOCAL_STAGE:-1}" = "1" ]; then
     STAGE_DIR="${GRAPHNET_STAGE_DIR:-${TMPDIR:-/tmp}/icemix-stage-$USER}"
+    DB_NEED_KB=$(du -ck "$DATA_ROOT"/nue.db "$DATA_ROOT"/numu.db \
+        "$DATA_ROOT"/nutau.db 2>/dev/null | tail -1 | awk '{print $1}')
 
     # Avoid concurrent rsyncs into the shared per-user staging directory.
     exec 9>"$STAGE_DIR.lock"
@@ -174,35 +172,6 @@ if [ "${LOCAL_STAGE:-1}" = "1" ]; then
     exec 9>&-
 fi
 export DATA_ROOT
-
-if [ "${PREWARM:-1}" = "1" ]; then
-    avail_kb=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
-
-    # Leave half of the allocation for training processes.
-    if [ -n "${SLURM_MEM_PER_NODE:-}" ]; then
-        budget_kb=$(( SLURM_MEM_PER_NODE * 1024 / 2 ))
-        if [ "$budget_kb" -lt "$avail_kb" ]; then
-            avail_kb="$budget_kb"
-            echo "pre-warm budget capped at half of --mem"\
-"($((SLURM_MEM_PER_NODE / 1024)) GiB)"
-        fi
-    fi
-
-    if [ -z "$avail_kb" ] || [ "$avail_kb" -lt "$DB_NEED_KB" ]; then
-        echo "[WARN] pre-warm skipped: need $((DB_NEED_KB / 1048576)) GiB of"
-        echo "       page cache, budget is $((${avail_kb:-0} / 1048576)) GiB."
-        echo "       Reading cold is correct, just slower."
-    else
-        echo "pre-warming $((DB_NEED_KB / 1048576)) GiB into the page cache"
-        prewarm_start=$SECONDS
-        for flavour in nue numu nutau; do
-            dd if="$DATA_ROOT/$flavour.db" of=/dev/null bs=16M \
-                status=none 2>/dev/null &
-        done
-        wait
-        echo "pre-warmed in $((SECONDS - prewarm_start)) s"
-    fi
-fi
 
 # Size workers per rank; an explicit --num-workers still wins.
 CPUS="${SLURM_CPUS_ON_NODE:-}"
