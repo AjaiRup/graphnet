@@ -141,9 +141,9 @@ class ArgumentParser(argparse.ArgumentParser):
             self.standard_arguments
         ).items():
             if remaining.contains(argument):
-                options["default"] = (
-                    remaining.pop_default(argument) or options["default"]
-                )
+                default = remaining.pop_default(argument)
+                if default is not None:
+                    options["default"] = default
                 self.add_argument("--" + argument, **options)
 
         assert (
