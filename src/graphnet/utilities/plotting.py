@@ -51,11 +51,10 @@ def angular_difference(results: pd.DataFrame) -> pd.Series:
 
 def vertex_distance(results: pd.DataFrame) -> pd.Series:
     """Return the distance in metres between true and predicted vertex."""
-    squared = sum(
-        (results[f"position_{axis}_pred"] - results[f"position_{axis}"]) ** 2
-        for axis in ("x", "y", "z")
-    )
-    return np.sqrt(squared)
+    predicted = results[[f"position_{axis}_pred" for axis in "xyz"]]
+    true = results[[f"position_{axis}" for axis in "xyz"]]
+    distance = np.linalg.norm(predicted.to_numpy() - true.to_numpy(), axis=1)
+    return pd.Series(distance, index=results.index)
 
 
 METRICS: Dict[str, Tuple[Callable[[pd.DataFrame], pd.Series], str]] = {
@@ -97,32 +96,18 @@ def binned_statistics(
     min_events: int = MIN_EVENTS_PER_BIN,
 ) -> pd.DataFrame:
     """Return fixed-bin percentiles, requiring ``min_events`` per bin."""
-    log_energy = np.log10(np.asarray(energy, dtype=float))
     edges = np.linspace(*log_energy_range, n_bins + 1)
-    indices = np.digitize(log_energy, edges) - 1
-
-    rows = []
-    for index in range(n_bins):
-        selected = np.asarray(values)[indices == index]
-        row = {
-            "log_energy": 0.5 * (edges[index] + edges[index + 1]),
-            "count": selected.size,
-        }
-        if selected.size >= min_events:
-            row.update(
-                {
-                    f"p{int(percentile)}": float(
-                        np.percentile(selected, percentile)
-                    )
-                    for percentile in percentiles
-                }
-            )
-        else:
-            row.update(
-                {f"p{int(percentile)}": np.nan for percentile in percentiles}
-            )
-        rows.append(row)
-    return pd.DataFrame(rows)
+    bins = pd.cut(
+        np.log10(np.asarray(energy, dtype=float)), edges, right=False
+    )
+    grouped = pd.Series(np.asarray(values)).groupby(bins, observed=False)
+    counts = grouped.size()
+    statistics = grouped.quantile([p / 100 for p in percentiles]).unstack()
+    statistics.columns = [f"p{int(p)}" for p in percentiles]
+    statistics = statistics.where(counts >= min_events, axis=0)
+    statistics.insert(0, "count", counts)
+    statistics.insert(0, "log_energy", 0.5 * (edges[:-1] + edges[1:]))
+    return statistics.reset_index(drop=True)
 
 
 def find_results(base_dir: str) -> Dict[str, str]:
@@ -227,23 +212,19 @@ def plot_resolution_vs_energy(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    metric_fn, ylabel = METRICS[metric]
+    _, ylabel = METRICS[metric]
+    statistics = resolution_statistics(
+        named_results,
+        metric,
+        event_classes=event_classes,
+        reference=reference,
+        n_bins=n_bins,
+        log_energy_range=log_energy_range,
+    )
+    if statistics.empty:
+        return []
     os.makedirs(output_dir, exist_ok=True)
     written = []
-
-    def statistics_for(
-        results: pd.DataFrame, event_class: str
-    ) -> pd.DataFrame:
-        """Return the binned statistics of one run and event class."""
-        subset = filter_by_class(results, event_class)
-        if subset.empty:
-            return pd.DataFrame()
-        return binned_statistics(
-            metric_fn(subset),
-            subset["energy"],
-            n_bins=n_bins,
-            log_energy_range=log_energy_range,
-        )
 
     for event_class in event_classes:
         if reference is not None:
@@ -258,39 +239,24 @@ def plot_resolution_vs_energy(
             figure, axis = plt.subplots(figsize=(7, 5))
             ratio_axis = None
 
-        # Resolved up front so the ratio panel does not depend on the order
-        # `named_results` happens to iterate in.
-        baseline: Optional[pd.DataFrame] = None
-        if reference is not None and reference in named_results:
-            candidate = statistics_for(named_results[reference], event_class)
-            baseline = None if candidate.empty else candidate
-
-        for label, results in named_results.items():
-            statistics = statistics_for(results, event_class)
-            if statistics.empty:
-                continue
-
-            line = axis.plot(
-                statistics["log_energy"], statistics["p50"], label=label
-            )[0]
+        runs = statistics[statistics["event_class"] == event_class]
+        for label, run in runs.groupby("run", sort=False):
+            line = axis.plot(run["log_energy"], run["p50"], label=label)[0]
             axis.fill_between(
-                statistics["log_energy"],
-                statistics["p16"],
-                statistics["p84"],
+                run["log_energy"],
+                run["p16"],
+                run["p84"],
                 alpha=0.15,
                 color=line.get_color(),
             )
             if (
                 ratio_axis is not None
-                and baseline is not None
+                and "ratio_to_reference" in run
                 and label != reference
             ):
-                merged = statistics.merge(
-                    baseline, on="log_energy", suffixes=("", "_reference")
-                )
                 ratio_axis.plot(
-                    merged["log_energy"],
-                    merged["p50"] / merged["p50_reference"],
+                    run["log_energy"],
+                    run["ratio_to_reference"],
                     color=line.get_color(),
                 )
 
