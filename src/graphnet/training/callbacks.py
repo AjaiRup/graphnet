@@ -476,6 +476,9 @@ class PhysicsMetricsCallback(Callback):
             metric.update(value)
 
     def _flush(self, pl_module: LightningModule, phase: str) -> None:
+        # The progress bar reads `sync_dist=True` epoch metrics on rank 0
+        # only; reading them on every rank keeps the collectives in step.
+        _ = pl_module.trainer.callback_metrics
         quantiles = torch.tensor(list(self.QUANTILES.values()))
         logged: Dict[str, Tensor] = {}
         for key, metric in self._metrics[phase].items():
