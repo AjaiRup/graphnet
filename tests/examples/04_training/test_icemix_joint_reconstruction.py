@@ -2,15 +2,15 @@
 
 import os
 import runpy
+from pathlib import Path
+from typing import Any, Dict, List
 
 import pytest
 import torch
 
 from graphnet.constants import GRAPHNET_ROOT_DIR
-from graphnet.models.transformer.icemix import (
-    IceMixReconstruction,
-    load_icemix_model,
-)
+from graphnet.models import Model
+from graphnet.models.transformer.icemix import IceMixReconstruction
 from graphnet.utilities.config import ModelConfig
 
 SCRIPT = os.path.join(
@@ -20,7 +20,7 @@ SCRIPT = os.path.join(
 
 
 @pytest.fixture(scope="module")
-def training():
+def training() -> Dict[str, Any]:
     return runpy.run_path(SCRIPT, run_name="icemix_training_test")
 
 
@@ -34,12 +34,16 @@ def training():
         ["--distribution-strategy", "ddp"],
     ],
 )
-def test_removed_arguments_are_rejected(training, arguments):
+def test_removed_arguments_are_rejected(
+    training: Dict[str, Any], arguments: List[str]
+) -> None:
     with pytest.raises(SystemExit):
         training["build_parser"]().parse_args(arguments)
 
 
-def test_defaults_and_rotation(training, tmp_path):
+def test_defaults_and_rotation(
+    training: Dict[str, Any], tmp_path: Path
+) -> None:
     args = training["build_parser"]().parse_args([])
     assert args.max_epochs == 80 and args.early_stopping_patience == 0
     assert args.rotation_augmentation and args.seed == 42
@@ -59,7 +63,9 @@ def test_defaults_and_rotation(training, tmp_path):
     assert not args.rotation_augmentation
 
 
-def test_config_overrides_reach_optimizer_and_loss(training, tmp_path):
+def test_config_overrides_reach_optimizer_and_loss(
+    training: Dict[str, Any], tmp_path: Path
+) -> None:
     path = tmp_path / "model.yml"
     ModelConfig(
         class_name="IceMixReconstruction",
@@ -104,26 +110,30 @@ def test_config_overrides_reach_optimizer_and_loss(training, tmp_path):
     assert model.backbone.blocks[-1].drop_path.drop_prob == 0.3
     saved = tmp_path / "saved.yml"
     model.save_config(str(saved))
-    restored = load_icemix_model(str(saved))
+    restored = Model.from_config(str(saved))
     assert restored.config.arguments == model.config.arguments
     restored.load_state_dict(model.state_dict(), strict=True)
     for key, value in model.state_dict().items():
         assert torch.equal(value, restored.state_dict()[key])
 
 
-def test_canonical_config_matches_default_constructor(training):
+def test_canonical_config_matches_default_constructor(
+    training: Dict[str, Any],
+) -> None:
     args = training["build_parser"]().parse_args([])
     configured = training["build_model"](args)
     default = IceMixReconstruction()
     assert configured.config.arguments == default.config.arguments
     with pytest.raises(TypeError):
-        IceMixReconstruction(vertex_only_norm=False)
+        IceMixReconstruction(vertex_only_norm=False)  # type: ignore[call-arg]
 
 
-def test_resume_path_is_forwarded_to_fit(training, monkeypatch, tmp_path):
+def test_resume_path_is_forwarded_to_fit(
+    training: Dict[str, Any], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     from types import SimpleNamespace
 
-    recorded = {}
+    recorded: Dict[str, Any] = {}
     model = SimpleNamespace(
         fit=lambda *args, **kwargs: recorded.update(kwargs),
         save_config=lambda path: None,
@@ -155,7 +165,7 @@ def test_resume_path_is_forwarded_to_fit(training, monkeypatch, tmp_path):
     assert recorded["max_epochs"] == 80
 
 
-def test_smoke_keeps_architecture(training):
+def test_smoke_keeps_architecture(training: Dict[str, Any]) -> None:
     args = training["build_parser"]().parse_args(
         ["--smoke-test", "--gpus", "0"]
     )

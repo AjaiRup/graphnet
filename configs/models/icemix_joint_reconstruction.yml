@@ -1,6 +1,6 @@
 class_name: IceMixReconstruction
 arguments:
-  vertex_weight: 2.6
+  vertex_weight: 0.026
   direction_weight: 1.0
   lr: 6.25e-5
   weight_decay: 0.01

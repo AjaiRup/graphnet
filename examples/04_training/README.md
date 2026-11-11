@@ -46,8 +46,8 @@ This subfolder contains two main training scripts:
 
 ## IceMix joint reconstruction
 
-IceMix uses one shared CLS token, vertex-only LayerNorm, global vertex targets
-scaled by 100 m, and continuous RDE features. Architecture and pulse sampling
+IceMix uses one shared CLS token, vertex-only LayerNorm, and continuous RDE
+features. Architecture and pulse sampling
 are fixed; the model config contains only loss, optimizer, scheduler, and
 dropout settings. Explicit CLI tuning arguments override that config.
 Training defaults to 80 epochs, rotation enabled, and no early stopping.

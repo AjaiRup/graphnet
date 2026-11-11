@@ -78,27 +78,6 @@ class DirectionReconstructionWithKappa(StandardLearnedTask):
         return torch.stack((vec_x, vec_y, vec_z, kappa), dim=1)
 
 
-class DirectionReconstructionWithKappaDecoupled(StandardLearnedTask):
-    """Reconstruct direction and vMF kappa as independent outputs."""
-
-    default_target_labels = ["direction"]
-    default_prediction_labels = [
-        "dir_x_pred",
-        "dir_y_pred",
-        "dir_z_pred",
-        "direction_kappa",
-    ]
-    nb_inputs = 4
-
-    def _forward(self, x: Tensor) -> Tensor:
-        norm = torch.linalg.vector_norm(x[:, [0, 1, 2]], dim=1) + eps_like(x)
-        vec_x = x[:, 0] / norm
-        vec_y = x[:, 1] / norm
-        vec_z = x[:, 2] / norm
-        kappa = torch.abs(x[:, 3])
-        return torch.stack((vec_x, vec_y, vec_z, kappa), dim=1)
-
-
 class DirectionReconstructionWithLogKappa(StandardLearnedTask):
     """Reconstructs direction with log-kappa from the 3D-vMF distribution.
 

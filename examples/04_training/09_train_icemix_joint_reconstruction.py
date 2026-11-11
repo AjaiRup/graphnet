@@ -28,7 +28,7 @@ from graphnet.data.dataset import (
     EnsembleDataset,
 )
 from graphnet.data.dataset.sqlite.sqlite_dataset import SQLiteDataset
-from graphnet.models import StandardModel
+from graphnet.models import Model
 from graphnet.models.data_representation import GraphDefinition
 from graphnet.training.callbacks import (
     PhysicsMetricsCallback,
@@ -37,7 +37,7 @@ from graphnet.training.callbacks import (
 )
 from graphnet.training.labels import Direction
 from graphnet.utilities.argparse import ArgumentParser
-from graphnet.utilities.config import DatasetConfig
+from graphnet.utilities.config import DatasetConfig, ModelConfig
 from graphnet.utilities.logging import Logger
 from graphnet.data.utilities.paths import resolve_dataset_paths
 from graphnet.data.utilities.splits import seeded_event_splits
@@ -46,11 +46,9 @@ from graphnet.data.utilities.sqlite_utilities import query_database
 from graphnet.models.transformer.icemix import (
     POSITION_LABELS,
     build_data_representation,
-    load_icemix_model,
     validate_dataset_config,
 )
 
-POSITION_SCALE_M = 100.0
 # Rotate nodes and global targets about the same physical DeepCore axis.
 DEEP_CORE_XY_ORIGIN_M = (46.3, -34.9)
 ICECUBE86_XY_SCALE_M = 500.0
@@ -237,21 +235,20 @@ def build_dataloaders(
     return dataloaders
 
 
-def build_model(args: Any) -> StandardModel:
-    return load_icemix_model(
-        args.model_config,
-        **{name: getattr(args, name, None) for name in MODEL_TUNING_ARGUMENTS},
-    )
+def build_model(args: Any) -> Model:
+    """Return the model of `--model-config` with CLI overrides applied."""
+    config = ModelConfig.load(args.model_config)
+    for name in MODEL_TUNING_ARGUMENTS:
+        if getattr(args, name, None) is not None:
+            config.arguments[name] = getattr(args, name)
+    return Model.from_config(config)
 
 
 def build_callbacks(args: Any, output_dir: str, rank: int = 0) -> List[Any]:
     """Return the training callbacks."""
     callbacks: List[Any] = [
         ProgressBar(),
-        PhysicsMetricsCallback(
-            position_scale=POSITION_SCALE_M,
-            sel_energy_min=SEL_ENERGY_MIN_GEV,
-        ),
+        PhysicsMetricsCallback(sel_energy_min=SEL_ENERGY_MIN_GEV),
         ModelCheckpoint(
             dirpath=os.path.join(output_dir, "checkpoints"),
             filename="best-{epoch:02d}-{val_loss:.4f}",
