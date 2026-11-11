@@ -165,6 +165,5 @@ data/examples/output/
 
 # Local run artifacts.
 /outputs/
-/.split_cache/
 /slurm/logs/
 /analysis/

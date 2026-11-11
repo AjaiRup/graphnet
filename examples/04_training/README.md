@@ -57,11 +57,10 @@ From the checkout root:
 ```bash
 export DATA_ROOT=/path/to/databases
 mkdir -p slurm/logs
-RUN_NAME=icemix-seed42 sbatch slurm/train_icemix.sh \
-    --split-cache-dir outputs/vertex-ablation/rde-vertex-ablation-v2/cache/splits
+RUN_NAME=icemix-seed42 sbatch slurm/train_icemix.sh
 ```
 
-Keep the existing seed-42 80/10/10 split cache. `--resume-from` restores an
+The seed-42 80/10/10 split is recomputed on every run. `--resume-from` restores an
 interrupted single-stage run. Use `--help` for training controls; model config
 values apply unless explicitly overridden. `--smoke-test` uses the small
 fixture with the full model and belongs on a compute node.

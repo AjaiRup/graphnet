@@ -102,7 +102,6 @@ def build_dataloaders(
     data_representation: GraphDefinition,
     dataloader_kwargs: Dict[str, Any],
     split_ratio: List[float],
-    split_cache_dir: Optional[str],
     group_factor: int = 0,
     max_pulses: Optional[int] = None,
     seed: int = 42,
@@ -147,7 +146,6 @@ def build_dataloaders(
         ratio=split_ratio,
         index_column=dataset_config.index_column,
         truth_table=dataset_config.truth_table,
-        cache_dir=split_cache_dir,
     )
 
     shared: Dict[str, Any] = dict(
@@ -351,7 +349,6 @@ def main(args: Any) -> None:
         data_representation=data_representation,
         dataloader_kwargs=dataloader_kwargs,
         split_ratio=[0.6, 0.2, 0.2] if args.smoke_test else [0.8, 0.1, 0.1],
-        split_cache_dir=args.split_cache_dir or args.cache_dir,
         group_factor=args.group_factor,
         max_pulses=max_pulses,
         seed=args.seed if args.seed is not None else 42,
@@ -565,12 +562,6 @@ def build_parser() -> ArgumentParser:
         default=16,
         help="Length-grouping window in global steps; 0 uses random batches.",
     )
-    data.add_argument(
-        "--cache-dir",
-        default=None,
-        help="Default cache directory for splits.",
-    )
-    data.add_argument("--split-cache-dir", default=None)
 
     model_group = parser.add_argument_group("model")
     model_group.add_argument(
