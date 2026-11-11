@@ -20,7 +20,7 @@ from pytorch_lightning.utilities import rank_zero_only
 from graphnet.constants import (
     DATASETS_CONFIG_DIR,
     EXAMPLE_OUTPUT_DIR,
-    GRAPHNET_ROOT_DIR,
+    MODEL_CONFIG_DIR,
 )
 from graphnet.data.dataloader import DataLoader, do_shuffle
 from graphnet.data.dataset import (
@@ -74,8 +74,7 @@ def single_threaded_worker(_worker_id: int) -> None:
 
 
 def batch_limit(value: str) -> Any:
-    """Parse a `--limit-*-batches` value: `int` is a batch count, `float`
-    a fraction of the epoch."""
+    """Parse a batch limit as an `int` count or a `float` epoch fraction."""
     return float(value) if "." in value else int(value)
 
 
@@ -110,7 +109,6 @@ def build_dataloaders(
 ) -> Dict[str, DataLoader]:
     """Return the train/validation/test dataloaders."""
     logger = Logger()
-    validate_dataset_config(dataset_config)
     if dataset_config.selection is not None:
         representation = data_representation.config.dict()
         representation["arguments"]["dtype"] = "torch.float32"
@@ -288,16 +286,15 @@ def build_callbacks(args: Any, output_dir: str, rank: int = 0) -> List[Any]:
             )
         )
     if args.rotation_augmentation:
-        position_xy_origin = DEEP_CORE_XY_ORIGIN_M
-        node_xy_origin = tuple(
-            coordinate / ICECUBE86_XY_SCALE_M
-            for coordinate in position_xy_origin
-        )
+        x, y = DEEP_CORE_XY_ORIGIN_M
         callbacks.append(
             RandomRotationCallback(
                 seed=None if args.seed is None else args.seed + rank,
-                node_xy_origin=node_xy_origin,
-                position_xy_origin=position_xy_origin,
+                node_xy_origin=(
+                    x / ICECUBE86_XY_SCALE_M,
+                    y / ICECUBE86_XY_SCALE_M,
+                ),
+                position_xy_origin=DEEP_CORE_XY_ORIGIN_M,
             )
         )
     return callbacks
@@ -482,11 +479,10 @@ def main(args: Any) -> None:
     datasets = getattr(
         prediction_loader.dataset, "datasets", [prediction_loader.dataset]
     )
-    sources = [
-        os.path.realpath(dataset.path)
-        for dataset in datasets
-        for _ in range(len(dataset))
-    ]
+    sources = np.repeat(
+        [os.path.realpath(dataset.path) for dataset in datasets],
+        [len(dataset) for dataset in datasets],
+    )
     if len(sources) != len(results):
         raise RuntimeError(
             "Prediction row count differs from the selected events"
@@ -551,14 +547,19 @@ def build_parser() -> ArgumentParser:
         ("early-stopping-patience", 0),
         ("batch-size", 256),
         ("num-workers", 3),
+        (
+            "dataset-config",
+            os.path.join(
+                DATASETS_CONFIG_DIR, "icecube86_joint_reconstruction.yml"
+            ),
+        ),
+        (
+            "model-config",
+            os.path.join(MODEL_CONFIG_DIR, "icemix_joint_reconstruction.yml"),
+        ),
     )
 
     data = parser.add_argument_group("data")
-    data.add_argument(
-        "--dataset-config",
-        default="configs/datasets/icecube86_joint_reconstruction.yml",
-        help="Path to a `DatasetConfig` YAML (default: %(default)s)",
-    )
     data.add_argument(
         "--group-factor",
         type=int,
@@ -567,12 +568,6 @@ def build_parser() -> ArgumentParser:
     )
 
     model_group = parser.add_argument_group("model")
-    model_group.add_argument(
-        "--model-config",
-        default=os.path.join(
-            GRAPHNET_ROOT_DIR, "configs/models/icemix_joint_reconstruction.yml"
-        ),
-    )
     model_group.add_argument(
         "--save-model-config",
         default=None,
