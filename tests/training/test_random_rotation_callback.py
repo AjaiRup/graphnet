@@ -36,13 +36,12 @@ def test_rotation_uses_matching_node_and_label_pivots() -> None:
     node_origin = (46.3 / 500.0, -34.9 / 500.0)
     position_origin = (46.3, -34.9)
     batch = torch.tensor([0, 0, 1])
-    node_xy = torch.tensor(
-        [[0.15, -0.02], [0.11, -0.12], [-0.03, 0.04]]
-    )
+    node_xy = torch.tensor([[0.15, -0.02], [0.11, -0.12], [-0.03, 0.04]])
     positions = torch.tensor([[60.0, -20.0], [25.0, -50.0]])
     directions = torch.tensor([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     data = SimpleNamespace(
         batch=batch,
+        num_graphs=2,
         x=torch.cat([node_xy, torch.ones(3, 1)], dim=1),
         position_x=positions[:, 0].clone(),
         position_y=positions[:, 1].clone(),
@@ -91,6 +90,7 @@ def test_rotation_default_remains_global_origin() -> None:
     """Preserve the legacy global-origin behaviour for generic callers."""
     data = SimpleNamespace(
         batch=torch.tensor([0]),
+        num_graphs=1,
         x=torch.tensor([[1.0, 0.0]]),
         position_x=torch.tensor([1.0]),
         position_y=torch.tensor([0.0]),
@@ -103,9 +103,7 @@ def test_rotation_default_remains_global_origin() -> None:
 
     RandomRotationCallback(seed=seed)._apply_rotation(data)
 
-    expected = _rotate_about(
-        torch.tensor([[1.0, 0.0]]), cos, sin, (0.0, 0.0)
-    )
+    expected = _rotate_about(torch.tensor([[1.0, 0.0]]), cos, sin, (0.0, 0.0))
     assert torch.allclose(data.x[:, :2], expected)
     assert torch.allclose(
         torch.stack([data.position_x, data.position_y], dim=1), expected

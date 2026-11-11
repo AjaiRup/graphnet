@@ -62,6 +62,7 @@ EXTRAS_REQUIRE = {
         "torch_cluster",
         "torch_spline_conv",
         "pytorch-lightning>=2.0,<=2.6.1",
+        "torchmetrics>=1.0",
     ],
     # --- PyTorch 2.6.0 ---
     "torch-26": [
@@ -73,6 +74,7 @@ EXTRAS_REQUIRE = {
         "torch_cluster",
         "torch_spline_conv",
         "pytorch-lightning>=2.0,<=2.6.1",
+        "torchmetrics>=1.0",
     ],
     # --- PyTorch 2.7.0 ---
     "torch-27": [
@@ -84,6 +86,7 @@ EXTRAS_REQUIRE = {
         "torch_cluster",
         "torch_spline_conv",
         "pytorch-lightning>=2.0,<=2.6.1",
+        "torchmetrics>=1.0",
     ],
 }
 
