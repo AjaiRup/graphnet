@@ -272,16 +272,6 @@ class LogCMK(torch.autograd.Function):
         ctx.m = m
         ctx.dtype = dtype
         kappa = kappa.double()
-        if m == 3:
-            # For m=3 the Bessel function has a closed form, so no host
-            # round-trip; `log1p` keeps it finite above kappa 700, where
-            # `scipy.special.iv` overflows.
-            return (
-                torch.log(kappa)
-                - kappa
-                - torch.log1p(-torch.exp(-2.0 * kappa))
-                - np.log(2 * np.pi)
-            ).type(dtype)
         iv = torch.from_numpy(
             scipy.special.iv(m / 2.0 - 1, kappa.cpu().numpy())
         ).to(kappa.device)
@@ -335,23 +325,12 @@ class LogCMK(torch.autograd.Function):
         kappa = ctx.saved_tensors[0]
         m = ctx.m
         dtype = ctx.dtype
-        if m == 3:
-            # Same closed form the `numpy` branch below uses, kept on the
-            # device. The small-`kappa` case is not an optimisation: the exact
-            # derivative $1/k - \\coth k$ is a difference of two ~1/k terms, so
-            # it cancels catastrophically below ~1e-6 and is `nan` at 0, where
-            # the series $-k/3$ is exact to O(k^3).
-            k = ctx.saved_tensors[0].double()
-            grads = torch.where(
-                k.abs() < 1e-6, -k / 3.0, 1.0 / k - 1.0 / torch.tanh(k)
-            )
-            return None, grad_output * grads.type(dtype)
         kappa = kappa.double().cpu().numpy()
         if np.isclose(m, 3, atol=1e-6):
             # Initialize gradient array
             grads = np.zeros_like(kappa)
 
-            # Handle small kappa (including zero) to avoid division by zero
+            # Handle small kappa values (including zero) to avoid division by zero
             small_mask = np.abs(kappa) < 1e-6
             grads[small_mask] = -kappa[small_mask] / 3
 
@@ -379,41 +358,11 @@ class VonMisesFisherLoss(LossFunction):
     prediction vectors need to be prepared.
     """
 
-    def __init__(
-        self,
-        kappa_switch: float = 700.0,
-        approximation: str = "tight",
-        **kwargs: Any,
-    ) -> None:
-        """Construct `VonMisesFisherLoss`."""
-        super().__init__(**kwargs)
-        self._kappa_switch = kappa_switch
-        self._approximation = approximation
-        # Fail at construction rather than in the first backward pass.
-        self._resolve_approximation(approximation)
-
-    @classmethod
-    def _resolve_approximation(cls, approximation: str) -> Any:
-        """Return the approximation callable named by `approximation`."""
-        approximations = {
-            "bound": cls.log_cmk_approx,
-            "tight": cls.log_cmk_approx_tight,
-        }
-        if approximation not in approximations:
-            raise ValueError(
-                f"Unknown approximation '{approximation}'. Expected one of "
-                f"{sorted(approximations)}."
-            )
-        return approximations[approximation]
-
     @classmethod
     def log_cmk_exact(
         cls, m: int, kappa: Tensor
     ) -> Tensor:  # pylint: disable=invalid-name
-        """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss exactly.
-
-        Only m != 3 reaches `scipy`; m=3 stays on the device.
-        """
+        """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss exactly."""
         return LogCMK.apply(m, kappa)
 
     @classmethod
@@ -423,12 +372,6 @@ class VonMisesFisherLoss(LossFunction):
         """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss approx.
 
         [https://arxiv.org/abs/1812.04616] Sec. 8.2 with additional minus sign.
-
-        Satisfies that paper's inequality: once anchored to the exact value at
-        small `kappa`, this stays at or below `log_cmk_exact` everywhere, so
-        the resulting loss is an upper bound on the true negative
-        log-likelihood. It pays for that with accuracy - see
-        `log_cmk_approx_tight`.
         """
         v = m / 2.0 - 0.5
         a = torch.sqrt((v + 1) ** 2 + kappa**2)
@@ -436,39 +379,24 @@ class VonMisesFisherLoss(LossFunction):
         return -a + b * torch.log(b + a)
 
     @classmethod
-    def log_cmk_approx_tight(
-        cls, m: int, kappa: Tensor
-    ) -> Tensor:  # pylint: disable=invalid-name
-        """Calculate $log C_{m}(k)$ approximately, favouring accuracy."""
-        v = m / 2.0
-        a = torch.sqrt((v + 0.5) ** 2 + kappa**2)
-        b = v - 0.5
-        return -a + b * torch.log(b + a)
-
-    @classmethod
     def log_cmk(
-        cls,
-        m: int,
-        kappa: Tensor,
-        kappa_switch: float = 700.0,
-        approximation: str = "tight",
+        cls, m: int, kappa: Tensor, kappa_switch: float = 100.0
     ) -> Tensor:  # pylint: disable=invalid-name
         """Calculate $log C_{m}(k)$ term in von Mises-Fisher loss.
 
         Since `log_cmk_exact` is diverges for `kappa` >~ 700 (using float64
-        precision), and since the asymptotic approximations are unaccurate for
-        small `kappa`, this method automatically switches between the two at
-        `kappa_switch`, ensuring continuity at this point.
+        precision), and since `log_cmk_approx` is unaccurate for small `kappa`,
+        this method automatically switches between the two at `kappa_switch`,
+        ensuring continuity at this point.
         """
-        log_cmk_approx = cls._resolve_approximation(approximation)
         kappa_switch = torch.tensor([kappa_switch]).to(kappa.device)
         mask_exact = kappa < kappa_switch
 
         # Ensure continuity at `kappa_switch`
-        offset = log_cmk_approx(m, kappa_switch) - cls.log_cmk_exact(
+        offset = cls.log_cmk_approx(m, kappa_switch) - cls.log_cmk_exact(
             m, kappa_switch
         )
-        ret = log_cmk_approx(m, kappa) - offset
+        ret = cls.log_cmk_approx(m, kappa) - offset
         ret[mask_exact] = cls.log_cmk_exact(m, kappa[mask_exact])
         return ret
 
@@ -494,10 +422,7 @@ class VonMisesFisherLoss(LossFunction):
         m = target.size()[1]
         k = torch.norm(prediction, dim=1)
         dotprod = torch.sum(prediction * target, dim=1)
-        elements = (
-            -self.log_cmk(m, k, self._kappa_switch, self._approximation)
-            - dotprod
-        )
+        elements = -self.log_cmk(m, k) - dotprod
         return elements
 
     @abstractmethod
@@ -550,7 +475,7 @@ class VonMisesFisher2DLoss(VonMisesFisherLoss):
 
 
 class EuclideanDistanceLoss(LossFunction):
-    """Euclidean (L2) distance in three dimensions."""
+    """Euclidean distance in three dimensions."""
 
     def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
         """Calculate 3D Euclidean distance between predicted and target.
@@ -562,14 +487,8 @@ class EuclideanDistanceLoss(LossFunction):
         Returns:
             Elementwise Euclidean distances. Shape [N,]
         """
-        squared = (
-            (prediction[:, 0] - target[:, 0]) ** 2
-            + (prediction[:, 1] - target[:, 1]) ** 2
-            + (prediction[:, 2] - target[:, 2]) ** 2
-        )
-        # Clamp: sqrt has an unbounded gradient at zero.
-        return torch.sqrt(
-            torch.clamp_min(squared, torch.finfo(squared.dtype).eps)
+        return torch.linalg.vector_norm(
+            prediction[:, :3] - target[:, :3], dim=1
         )
 
 
@@ -772,7 +691,11 @@ class NegCosLoss(LossFunction):
 
 
 class PerEventRecordingLoss(LossFunction):
-    """Transparent wrapper that retains a loss' most recent per-event terms."""
+    """Wrap a loss function and keep its most recent inputs.
+
+    Lets callbacks compute per-event metrics from the predictions and targets
+    of the last forward pass without recomputing the model.
+    """
 
     def __init__(
         self,
@@ -780,19 +703,21 @@ class PerEventRecordingLoss(LossFunction):
         metric_name: Optional[str] = None,
         **kwargs: Any,
     ) -> None:
-        """Construct `PerEventRecordingLoss`."""
+        """Construct `PerEventRecordingLoss`.
+
+        Args:
+            loss_function: Loss function to wrap.
+            metric_name: Name under which callbacks look up this recorder.
+            **kwargs: Passed to `LossFunction`.
+        """
         super().__init__(**kwargs)
         self._loss_function = loss_function
         self.metric_name = metric_name
         self.last_prediction: Optional[Tensor] = None
         self.last_target: Optional[Tensor] = None
-        self.last_elements: Optional[Tensor] = None
 
     def _forward(self, prediction: Tensor, target: Tensor) -> Tensor:
-        """Delegate to the wrapped loss, recording its inputs and output."""
-        elements = self._loss_function._forward(prediction, target)
-        with torch.no_grad():
-            self.last_prediction = prediction.detach()
-            self.last_target = target.detach()
-            self.last_elements = elements.detach()
-        return elements
+        """Delegate to the wrapped loss, recording its inputs."""
+        self.last_prediction = prediction.detach()
+        self.last_target = target.detach()
+        return self._loss_function._forward(prediction, target)
