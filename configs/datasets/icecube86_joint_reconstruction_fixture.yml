@@ -1,21 +1,4 @@
 path: $GRAPHNET/data/tests/sqlite/oscNext_genie_level7_v02/oscNext_genie_level7_v02_first_5_frames.db
-data_representation:
-  class_name: GraphDefinition
-  arguments:
-    detector:
-      class_name: IceCube86
-      arguments: {}
-    node_definition:
-      class_name: IceMixNodes
-      arguments:
-        input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, rde]
-        max_pulses: 256
-        z_name: dom_z
-        hlc_name: null
-        add_ice_properties: false
-    input_feature_names: [dom_x, dom_y, dom_z, dom_time, charge, rde]
-    dtype: torch.float32
-    add_static_features: false
 pulsemaps:
   - SRTInIcePulses
 features:
