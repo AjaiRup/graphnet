@@ -8,11 +8,11 @@ from torch import Tensor, nn
 from torch_geometric.data import Data
 
 from graphnet.models import Model, StandardModel
+from graphnet.models.components.attention_blocks import Block, Block_rel
 from graphnet.models.components.embedding import (
     SinusoidalPosEmb,
-    SpacetimeEncoder,
+    SpacetimeEncoderEPJC,
 )
-from graphnet.models.components.layers import Block, Block_rel
 from graphnet.models.data_representation import GraphDefinition
 from graphnet.models.data_representation.graphs.nodes import IceMixNodes
 from graphnet.models.detector.icecube import IceCube86
@@ -107,7 +107,7 @@ class IceMix(Model):
             if not 0 <= rate < 1:
                 raise ValueError("Dropout rates must lie in [0, 1)")
         self.fourier_ext = _RDEEncoder()
-        self.rel_pos = SpacetimeEncoder(seq_length=32)
+        self.rel_pos = SpacetimeEncoderEPJC(seq_length=32)
         self.sandwich = nn.ModuleList(
             [
                 Block_rel(
@@ -238,9 +238,7 @@ class IceMixReconstruction(StandardModel):
             transform_target=scale_position,
             transform_inference=unscale_position,
         )
-        direction_loss = VonMisesFisher3DLoss(
-            kappa_switch=700.0, approximation="tight"
-        )
+        direction_loss = VonMisesFisher3DLoss()
         if direction_weight != 1.0:
             direction_loss = EnsembleLoss(
                 [direction_loss], loss_factors=[direction_weight]
